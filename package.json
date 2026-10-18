@@ -1,0 +1,11 @@
+{
+  "name": "cliphunt",
+  "version": "0.1.0",
+  "description": "Long video in, short vertical clips out. Zero npm dependencies; needs ffmpeg.",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cliphunt: long video in, short clips out</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Cliphunt</h1>
+    <p class="tagline">Paste a long video. Get short clips ready to post.</p>
+    <div id="caps" class="caps" aria-live="polite"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="side">
+      <form id="new" class="card" autocomplete="off">
+        <h2>New project</h2>
+        <div class="seg" role="tablist">
+          <button type="button" role="tab" data-src="upload" class="on">Upload a file</button>
+          <button type="button" role="tab" data-src="youtube">YouTube link</button>
+        </div>
+        <div id="src-upload">
+          <label class="drop" id="drop">
+            <input type="file" id="file" accept="video/*,audio/*">
+            <span id="drop-text">Choose a video or drop it here</span>
+          </label>
+          <div class="bar" id="upbar" hidden><i></i></div>
+        </div>
+        <div id="src-youtube" hidden>
+          <input type="url" id="yt" placeholder="https://www.youtube.com/watch?v=...">
+        </div>
+        <label>Project name <input id="ptitle" placeholder="Optional"></label>
+        <div class="row">
+          <label>Clips <input type="number" id="count" value="5" min="1" max="20"></label>
+          <label>Shortest (s) <input type="number" id="minLen" value="20" min="8" max="120"></label>
+          <label>Longest (s) <input type="number" id="maxLen" value="60" min="15" max="180"></label>
+        </div>
+        <label>Shape
+          <select id="aspect"><option>9:16</option><option>1:1</option><option>16:9</option></select>
+        </label>
+        <label>What should I look for? <input id="prompt" placeholder="e.g. moments where the guest gives money advice"></label>
+        <p class="note" id="token-note"></p>
+        <label class="check"><input type="checkbox" id="rights"> I own this video or have permission to use it.</label>
+        <button class="primary" id="go" type="submit">Find clips</button>
+      </form>
+      <div class="card">
+        <h2>Projects</h2>
+        <ul id="plist" class="plist"></ul>
+      </div>
+    </aside>
+
+    <main id="main" class="main"></main>
+  </div>
+
+  <section id="editor" class="editor" hidden aria-label="Clip editor"></section>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
