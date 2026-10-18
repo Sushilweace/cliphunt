@@ -44,13 +44,23 @@ function toast(msg, bad = false) {
 
 // ---------- init ----------
 async function init() {
+  if (window.location.search.includes('youtube=connected')) {
+    toast('YouTube account connected successfully!');
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+
   [state.config, state.music] = await Promise.all([api('/api/config'), api('/api/music')]);
   const c = state.config;
+  const ytChip = `<button type="button" class="chip ${c.youtubeStatus?.connected ? 'on yt-connected' : 'yt-disconnected'}" id="yt-status-chip">YouTube: ${c.youtubeStatus?.connected ? (c.youtubeStatus.channel?.customUrl || c.youtubeStatus.channel?.title || 'Connected') : 'Connect'}</button>`;
   $('#caps').innerHTML = [
     [c.transcribe !== 'none', `Speech: ${c.transcribe === 'none' ? 'off' : c.transcribe}`],
     [c.llm, c.llm ? `AI picks: ${c.llmProvider}` : 'AI picks: basic'],
     [c.tts, c.tts ? 'Voice-over AI: on' : 'Voice-over AI: off'],
-  ].map(([on, t]) => `<span class="chip ${on ? 'on' : ''}">${t}</span>`).join('');
+  ].map(([on, t]) => `<span class="chip ${on ? 'on' : ''}">${t}</span>`).join('') + ytChip;
+
+  $('#yt-status-chip')?.addEventListener('click', openYouTubeSettingsModal);
+  wireYouTubeModals();
+
   if (!c.youtube) $('[data-src=youtube]').hidden = true;
   const lim = c.tokenLimits || {};
   const note = $('#token-note');
@@ -98,7 +108,7 @@ async function tick() {
     if (busy) await loadProjects();
     if (!state.pid) return;
     const p = state.project;
-    const active = !p || p.status === 'processing' || p.status === 'queued' || p.clips?.some((c) => c.status === 'rendering' || c.status === 'queued');
+    const active = !p || p.status === 'processing' || p.status === 'queued' || p.clips?.some((c) => c.status === 'rendering' || c.status === 'queued' || c.youtube?.status === 'uploading');
     if (!active) return;
     const fresh = await api(`/api/projects/${state.pid}`);
     state.project = fresh;
@@ -106,6 +116,7 @@ async function tick() {
     else if (fresh.status === 'ready') updateCards();
     else renderMain();
     if (state.draft) syncEditorStatus();
+    if (ytActiveClipId && $('#yt-upload-modal')?.open) syncYouTubeUploadModal(ytActiveClipId);
   } catch {}
 }
 
@@ -218,15 +229,31 @@ function thumbOf(p, c) {
 }
 function cardHTML(c) {
   const p = state.project;
-  const st = c.status === 'done' ? '<span class="state ok">Rendered</span>' : c.status === 'rendering' ? `<span class="state">Rendering ${c.progress}%</span>` : c.status === 'queued' ? '<span class="state">Queued</span>' : c.status === 'error' ? '<span class="state">Failed</span>' : '';
+  let st = c.status === 'done' ? '<span class="state ok">Rendered</span>' : c.status === 'rendering' ? `<span class="state">Rendering ${c.progress}%</span>` : c.status === 'queued' ? '<span class="state">Queued</span>' : c.status === 'error' ? '<span class="state">Failed</span>' : '';
+  if (c.youtube?.status === 'uploaded') {
+    if (c.youtube.publishAt) {
+      const d = new Date(c.youtube.publishAt);
+      st = `<span class="state yt scheduled" title="Scheduled: ${esc(d.toLocaleString())}">Scheduled</span>`;
+    } else {
+      st = '<span class="state yt">Short on YouTube</span>';
+    }
+  } else if (c.youtube?.status === 'uploading') {
+    st = `<span class="state yt">Uploading ${c.youtube.progress || 0}%</span>`;
+  }
   const dur = c.segments.reduce((a, g) => a + g.end - g.start, 0);
   const parts = c.segments.length > 1 ? ` · ${c.segments.length} parts` : '';
   const tok = c.usage?.total ? ` · ${c.usage.total.toLocaleString()} tokens` : '';
+  const ytAction = c.outputFile
+    ? (c.youtube?.videoUrl
+        ? `<a class="ghost yt-red" target="_blank" rel="noreferrer" href="${c.youtube.videoUrl}">Short ↗</a>`
+        : `<button type="button" class="ghost yt-red" data-yt="${c.id}">${c.youtube?.status === 'uploaded' ? 'YouTube' : 'Post Short'}</button>`)
+    : '';
+
   return `<article class="clip" data-clip="${c.id}">
     <button class="th" data-edit="${c.id}" aria-label="Edit ${esc(c.title)}"><img src="${thumbOf(p, c)}" alt="" loading="lazy"><span class="score">${c.score}</span>${st}</button>
     <div class="body"><h3>${esc(c.title)}</h3><div class="range">${fmt(c.segments[0].start)} to ${fmt(c.segments[c.segments.length - 1].end)} · ${Math.round(dur)}s · ${c.aspect}${parts}${tok}</div>
     <div class="why">${esc(c.reason)}</div>
-    <div class="acts"><button class="ghost" data-edit="${c.id}">Edit</button><button class="ghost" data-react="${c.id}">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}">Download</a>` : ''}</div></div></article>`;
+    <div class="acts"><button class="ghost" data-edit="${c.id}">Edit</button><button class="ghost" data-react="${c.id}">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}">Download</a>` : ''}${ytAction}</div></div></article>`;
 }
 function updateCards() {
   const g = $('#grid');
@@ -234,6 +261,8 @@ function updateCards() {
   g.innerHTML = state.project.clips.map(cardHTML).join('');
 }
 $('#main').addEventListener('click', (e) => {
+  const yt = e.target.closest('[data-yt]');
+  if (yt) { openYouTubeUploadModal(yt.dataset.yt); return; }
   const r = e.target.closest('[data-react]');
   if (r) { openEditor(r.dataset.react, true); return; }
   const b = e.target.closest('[data-edit]');
@@ -360,11 +389,17 @@ function renderEditor() {
     <fieldset><legend>Post copy</legend>
       <label>Description <textarea data-k="description">${esc(d.description)}</textarea></label>
       <label>Hashtags <input data-k="hashtags" value="${esc((d.hashtags || []).map((h) => '#' + h).join(' '))}"></label>
-      <div class="inline"><button class="ghost" id="desc-go">Write it for me</button><button class="ghost" id="desc-copy">Copy</button></div>
+      <div class="inline">
+        <button class="ghost" id="desc-go">Write it for me</button>
+        <button class="ghost" id="desc-copy">Copy</button>
+        <button type="button" class="ghost yt-red" id="desc-yt" ${d.outputFile ? '' : 'disabled title="Render clip first"'}>Upload / Schedule Short</button>
+      </div>
     </fieldset>
   </div>
   <div class="ed-foot"><div class="bar" id="rbar" hidden><i></i></div><span id="rtext" class="note" style="margin:0"></span><span style="flex:1"></span>
-    <a class="ghost" id="dl" download hidden>Download</a><button class="primary" id="render">Render clip</button></div>`;
+    <a class="ghost" id="dl" download hidden>Download</a>
+    ${d.outputFile ? '<button type="button" class="ghost yt-red" id="ed-yt-btn">YouTube Short</button>' : ''}
+    <button class="primary" id="render">Render clip</button></div>`;
   wireEditor();
   setPreview();
   syncEditorStatus();
@@ -575,6 +610,14 @@ function wireEditor() {
     await navigator.clipboard.writeText(`${d.description}\n\n${(d.hashtags || []).map((h) => '#' + h).join(' ')}`.trim());
     toast('Copied');
   };
+  $('#desc-yt')?.addEventListener('click', () => {
+    saveDraft();
+    openYouTubeUploadModal(state.draft.id);
+  });
+  $('#ed-yt-btn')?.addEventListener('click', () => {
+    saveDraft();
+    openYouTubeUploadModal(state.draft.id);
+  });
 
   // voice-over
   $('#bubble-pos')?.addEventListener('click', (e) => {
@@ -676,8 +719,313 @@ async function toggleRecording(kind) {
   }
 }
 
+// ---------- YouTube Integration ----------
+let ytActiveClipId = null;
+
+function toLocalISOString(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const Y = d.getFullYear();
+  const M = pad(d.getMonth() + 1);
+  const D = pad(d.getDate());
+  const h = pad(d.getHours());
+  const m = pad(d.getMinutes());
+  return `${Y}-${M}-${D}T${h}:${m}`;
+}
+
+function renderYouTubeChip() {
+  const chip = $('#yt-status-chip');
+  if (!chip) return;
+  const st = state.config.youtubeStatus;
+  if (st?.connected && st?.channel) {
+    chip.className = 'chip on yt-connected';
+    chip.textContent = `YouTube: ${st.channel.customUrl || st.channel.title}`;
+  } else {
+    chip.className = 'chip yt-disconnected';
+    chip.textContent = 'YouTube: Connect';
+  }
+}
+
+async function openYouTubeSettingsModal() {
+  const pop = $('#yt-modal');
+  if (!pop) return;
+  try {
+    const st = await api('/api/youtube/status');
+    state.config.youtubeStatus = st;
+    renderYouTubeSettings(st);
+    if (!pop.open) pop.showModal();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function renderYouTubeSettings(status) {
+  const info = $('#yt-account-info');
+  const disBtn = $('#yt-disconnect-btn');
+  const connBtn = $('#yt-connect-btn');
+  if (status.connected && status.channel) {
+    info.innerHTML = `
+      <div class="yt-channel-card">
+        ${status.channel.thumbnail ? `<img src="${esc(status.channel.thumbnail)}" alt="">` : ''}
+        <div class="yt-channel-meta">
+          <h4>${esc(status.channel.title)}</h4>
+          <p>${esc(status.channel.customUrl || 'Channel Connected')}</p>
+        </div>
+      </div>
+      <p class="note" style="margin-top:8px;color:var(--ok)">✓ Channel connected. You are ready to upload Shorts with predefined schedules.</p>
+    `;
+    disBtn.hidden = false;
+    connBtn.textContent = 'Reconnect Channel';
+  } else {
+    info.innerHTML = `
+      <p style="margin:0"><strong>YouTube Not Connected.</strong> Connect your account to enable 1-click Shorts uploading and cloud scheduling.</p>
+    `;
+    disBtn.hidden = true;
+    connBtn.textContent = 'Connect YouTube Channel';
+  }
+  const redirectUri = `${window.location.origin}/api/youtube/callback`;
+  $('#yt-redirect-uri').value = redirectUri;
+}
+
+async function openYouTubeUploadModal(id) {
+  const c = clipOf(id);
+  if (!c) return;
+  ytActiveClipId = id;
+  const pop = $('#yt-upload-modal');
+  if (!pop) return;
+
+  const ytStatus = state.config.youtubeStatus || (await api('/api/youtube/status').catch(() => ({})));
+  state.config.youtubeStatus = ytStatus;
+
+  const badge = $('#yt-channel-badge');
+  if (ytStatus.connected && ytStatus.channel) {
+    badge.innerHTML = `<span class="chip on">Connected: <strong>${esc(ytStatus.channel.title)}</strong> ${esc(ytStatus.channel.customUrl || '')}</span>`;
+  } else {
+    badge.innerHTML = `<span class="chip" style="background:#fee2e2;color:#b91c1c">YouTube channel not connected. <button type="button" class="ghost" id="yt-open-settings-inline" style="padding:2px 8px;font-size:11px;margin-left:6px">Connect now</button></span>`;
+    $('#yt-open-settings-inline')?.addEventListener('click', () => {
+      pop.close();
+      openYouTubeSettingsModal();
+    });
+  }
+
+  // Auto-fill Title with #Shorts
+  let title = c.title || 'Short Clip';
+  if (!title.toLowerCase().includes('#shorts')) {
+    title = title.slice(0, 91).trim() + ' #Shorts';
+  }
+  $('#ytu-title').value = title;
+
+  // Auto-fill Description & Hashtags
+  const tagsList = (c.hashtags || []).map((h) => (h.startsWith('#') ? h : `#${h}`));
+  if (!tagsList.some((t) => t.toLowerCase() === '#shorts')) tagsList.push('#Shorts');
+  const desc = c.description || c.title || '';
+  $('#ytu-desc').value = `${desc}\n\n${tagsList.join(' ')}`.trim();
+  $('#ytu-tags').value = (c.hashtags || []).join(', ');
+
+  // Default predefined schedule time: Tomorrow 10:00 AM
+  const defTime = new Date();
+  defTime.setDate(defTime.getDate() + 1);
+  defTime.setHours(10, 0, 0, 0);
+  $('#ytu-time').value = toLocalISOString(defTime);
+
+  // Status message
+  const statusEl = $('#yt-upload-status');
+  if (c.youtube?.status === 'uploaded') {
+    const pub = c.youtube.publishAt ? `Scheduled for ${new Date(c.youtube.publishAt).toLocaleString()}` : 'Uploaded as Public Short';
+    statusEl.innerHTML = `<div class="yt-box" style="margin:0"><strong>Current Status:</strong> ${pub}. <a href="${esc(c.youtube.videoUrl)}" target="_blank" rel="noreferrer">Open Short on YouTube ↗</a></div>`;
+  } else if (c.youtube?.status === 'uploading') {
+    statusEl.innerHTML = `<div class="yt-box" style="margin:0"><strong>Uploading…</strong> ${c.youtube.progress || 0}%</div>`;
+  } else if (c.youtube?.status === 'error') {
+    statusEl.innerHTML = `<div class="err">${esc(c.youtube.error)}</div>`;
+  } else {
+    statusEl.innerHTML = '';
+  }
+
+  $('#ytu-bar').hidden = true;
+  $('#ytu-msg').textContent = '';
+  $('#ytu-submit').disabled = false;
+  $('#ytu-submit').textContent = c.youtube?.status === 'uploaded' ? 'Upload Again' : 'Upload & Schedule Short';
+
+  if (!pop.open) pop.showModal();
+}
+
+function syncYouTubeUploadModal(id) {
+  const c = clipOf(id);
+  if (!c || !c.youtube) return;
+  const pop = $('#yt-upload-modal');
+  if (!pop || !pop.open) return;
+  const y = c.youtube;
+  const btn = $('#ytu-submit');
+  const bar = $('#ytu-bar');
+  const msg = $('#ytu-msg');
+  const statusEl = $('#yt-upload-status');
+
+  if (y.status === 'uploading') {
+    btn.disabled = true;
+    btn.textContent = `Uploading… ${y.progress || 0}%`;
+    bar.hidden = false;
+    bar.querySelector('i').style.width = `${y.progress || 0}%`;
+    msg.textContent = `Uploading bytes to YouTube (${y.progress || 0}%)…`;
+  } else if (y.status === 'uploaded') {
+    btn.disabled = false;
+    btn.textContent = 'Upload Again';
+    bar.hidden = false;
+    bar.querySelector('i').style.width = '100%';
+    const dt = y.publishAt ? new Date(y.publishAt).toLocaleString() : 'Public Short';
+    const label = y.publishAt ? `Scheduled to publish on YouTube: <strong>${dt}</strong>` : 'Published successfully!';
+    msg.innerHTML = `✓ ${label} <br><a href="${esc(y.videoUrl)}" target="_blank" rel="noreferrer" class="ghost yt-red" style="margin-top:8px;display:inline-block">Open Short on YouTube ↗</a>`;
+    statusEl.innerHTML = `<div class="yt-box" style="margin:0">✓ Short uploaded. <a href="${esc(y.videoUrl)}" target="_blank" rel="noreferrer">Open on YouTube ↗</a></div>`;
+  } else if (y.status === 'error') {
+    btn.disabled = false;
+    btn.textContent = 'Upload & Schedule Short';
+    bar.hidden = true;
+    msg.textContent = '';
+    statusEl.innerHTML = `<div class="err">${esc(y.error || 'Upload failed')}</div>`;
+  }
+}
+
+function wireYouTubeModals() {
+  $('#yt-save-creds')?.addEventListener('click', async () => {
+    const clientId = $('#yt-client-id').value.trim();
+    const clientSecret = $('#yt-client-secret').value.trim();
+    const redirectUri = $('#yt-redirect-uri').value.trim();
+    if (!clientId || !clientSecret) return toast('Please enter both Client ID and Client Secret', true);
+    try {
+      const st = await post('/api/youtube/credentials', { clientId, clientSecret, redirectUri });
+      state.config.youtubeStatus = st;
+      toast('Credentials saved');
+      renderYouTubeSettings(st);
+      renderYouTubeChip();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $('#yt-connect-btn')?.addEventListener('click', async () => {
+    try {
+      const redirectUri = $('#yt-redirect-uri').value;
+      const { url } = await api(`/api/youtube/auth-url?redirectUri=${encodeURIComponent(redirectUri)}`);
+      const w = window.open(url, 'yt_auth', 'width=560,height=700');
+      if (!w) {
+        window.location.href = url;
+      }
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $('#yt-disconnect-btn')?.addEventListener('click', async () => {
+    if (!confirm('Disconnect your YouTube channel?')) return;
+    try {
+      const st = await post('/api/youtube/disconnect');
+      state.config.youtubeStatus = st;
+      toast('YouTube channel disconnected');
+      renderYouTubeSettings(st);
+      renderYouTubeChip();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $('#ytu-mode')?.addEventListener('change', () => {
+    const isSchedule = $('#ytu-mode').value === 'schedule';
+    $('#ytu-time-box').hidden = !isSchedule;
+    $('#ytu-quick-times').hidden = !isSchedule;
+  });
+
+  $('#ytu-quick-times')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const offset = b.dataset.offset;
+    const preset = b.dataset.preset;
+    const d = new Date();
+    if (offset) {
+      d.setTime(d.getTime() + Number(offset) * 3600000);
+    } else if (preset === 'tonight') {
+      if (d.getHours() >= 20) d.setDate(d.getDate() + 1);
+      d.setHours(20, 0, 0, 0);
+    } else if (preset === 'tomorrow_morning') {
+      d.setDate(d.getDate() + 1);
+      d.setHours(10, 0, 0, 0);
+    } else if (preset === 'tomorrow_evening') {
+      d.setDate(d.getDate() + 1);
+      d.setHours(18, 0, 0, 0);
+    }
+    $('#ytu-time').value = toLocalISOString(d);
+  });
+
+  $('#ytu-submit')?.addEventListener('click', async () => {
+    if (!ytActiveClipId) return;
+    const c = clipOf(ytActiveClipId);
+    if (!c) return;
+    if (!state.config.youtubeStatus?.connected) {
+      toast('Please connect your YouTube account first', true);
+      openYouTubeSettingsModal();
+      return;
+    }
+    const mode = $('#ytu-mode').value;
+    let publishAt = null;
+    let privacyStatus = mode;
+    if (mode === 'schedule') {
+      const v = $('#ytu-time').value;
+      if (!v) return toast('Please choose a scheduled time', true);
+      const d = new Date(v);
+      if (isNaN(d.getTime()) || d.getTime() <= Date.now() + 60000) {
+        return toast('Scheduled time must be at least 2 minutes in the future', true);
+      }
+      publishAt = d.toISOString();
+      privacyStatus = 'private';
+    }
+
+    const title = $('#ytu-title').value.trim();
+    const description = $('#ytu-desc').value.trim();
+    const hashtags = $('#ytu-tags').value.split(/[\s,]+/).map((h) => h.replace(/^#/, '')).filter(Boolean);
+
+    const btn = $('#ytu-submit');
+    btn.disabled = true;
+    btn.textContent = 'Uploading to YouTube…';
+    $('#ytu-bar').hidden = false;
+    $('#ytu-bar i').style.width = '10%';
+    $('#ytu-msg').textContent = 'Connecting and uploading video to YouTube…';
+
+    try {
+      const res = await post(`/api/clips/${c.id}/youtube`, {
+        title,
+        description,
+        hashtags,
+        publishAt,
+        privacyStatus,
+      });
+      const i = state.project.clips.findIndex((x) => x.id === c.id);
+      if (i !== -1) state.project.clips[i] = { ...state.project.clips[i], ...res };
+      updateCards();
+      toast('Upload started in background');
+      syncYouTubeUploadModal(c.id);
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Upload & Schedule Short';
+      $('#ytu-bar').hidden = true;
+      $('#ytu-msg').textContent = '';
+      toast(err.message, true);
+    }
+  });
+
+  window.addEventListener('message', async (ev) => {
+    if (ev.data?.type === 'youtube-connected') {
+      toast('YouTube connected successfully!');
+      const st = await api('/api/youtube/status').catch(() => ({}));
+      state.config.youtubeStatus = st;
+      renderYouTubeChip();
+      const modal = $('#yt-modal');
+      if (modal?.open) renderYouTubeSettings(st);
+      const uModal = $('#yt-upload-modal');
+      if (uModal?.open && ytActiveClipId) openYouTubeUploadModal(ytActiveClipId);
+    }
+  });
+}
+
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || $('#editor').hidden || $('#react-pop')?.open) return;
+  if (e.key !== 'Escape' || $('#editor').hidden || $('#react-pop')?.open || $('#yt-modal')?.open || $('#yt-upload-modal')?.open) return;
   $('#ed-close').click();
 });
 init().catch((e) => toast(e.message, true));
+

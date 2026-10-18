@@ -65,6 +65,7 @@ Install: `ffmpeg` (with libx264, libass, libmp3lame). Optional: `yt-dlp` (YouTub
 | Supercuts | A clip is a list of segments, joined in order |
 | Logo overlay | Upload a PNG once |
 | Post description and hashtags | AI or keyword fallback, with copy button |
+| YouTube Shorts Upload & Scheduling | Resumable upload to your channel via YouTube Data API v3; auto-adds #Shorts, fills description & hashtags, native cloud scheduling (publishAt) |
 | Thumbnails, progress, download | Yes |
 
 ## Not built yet (honest list)
@@ -73,24 +74,25 @@ Install: `ffmpeg` (with libx264, libass, libmp3lame). Optional: `yt-dlp` (YouTub
   Upgrade path: replace `tools/face_center.py` with a tracker that writes a per-second timeline, and drive the crop with ffmpeg `sendcmd`.
 - Speaker labels (needs a diarization provider such as Deepgram, AssemblyAI or pyannote).
 - Realtime livestream clipping.
-- Direct posting and scheduling. Needs app review from TikTok, Meta and Google. Download and post manually until then.
+- TikTok & Instagram direct publishing (requires individual developer partner app review).
 - AI-generated music, scene transitions, intro/outro, brand preset library, accounts and payments.
 - Login. Do not expose this to the internet as is.
 
 ## How it is organised
 
 ```
-server/index.js      HTTP API, uploads, range streaming
-server/pipeline.js   ingest -> proxy -> audio -> transcript -> highlights -> clips
-server/transcribe.js Whisper API / local / mock, 15 minute chunks with overlap
-server/highlights.js AI + heuristic ranking, snapping to sentence edges, description writer
-server/captions.js   ASS builder (captions + title)
-server/render.js     one ffmpeg filter graph per clip: cut, reframe, filter, logo, bubble, captions, audio mix
-server/llm.js        Anthropic or local Ollama, strict JSON parsing
-server/queue.js      in-process queue (swap for BullMQ/Redis when you scale)
-server/store.js      JSON file database (swap for Postgres when you scale)
-public/              the web app (plain JS, no build step)
-tools/               python helpers
+server/index.js        HTTP API, uploads, range streaming
+server/pipeline.js     ingest -> proxy -> audio -> transcript -> highlights -> clips
+server/transcribe.js   Whisper API / local / mock, 15 minute chunks with overlap
+server/highlights.js   AI + heuristic ranking, snapping to sentence edges, description writer
+server/captions.js     ASS builder (captions + title)
+server/render.js       one ffmpeg filter graph per clip: cut, reframe, filter, logo, bubble, captions, audio mix
+server/llm.js          Anthropic or local Ollama, strict JSON parsing
+server/youtube_api.js  YouTube Data API v3: OAuth 2.0 flow, token refresh, resumable upload & scheduling
+server/queue.js        in-process queue (swap for BullMQ/Redis when you scale)
+server/store.js        JSON file database (swap for Postgres when you scale)
+public/                the web app (plain JS, no build step)
+tools/                 python helpers
 ```
 
 Data lives in `data/` (database, uploads, projects, music). Delete a project in the UI to free its disk.

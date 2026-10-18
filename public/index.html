@@ -58,6 +58,99 @@
   </div>
 
   <section id="editor" class="editor" hidden aria-label="Clip editor"></section>
+
+  <!-- YouTube Settings Modal -->
+  <dialog id="yt-modal" class="pop">
+    <form method="dialog" class="pop-head">
+      <h3>YouTube Account & API Settings</h3>
+      <button class="ghost" value="close">Close</button>
+    </form>
+    <div class="pop-body">
+      <div id="yt-account-info" class="yt-box"></div>
+      
+      <fieldset>
+        <legend>Google Cloud OAuth 2.0 Credentials</legend>
+        <p class="note">To upload and schedule to your channel, enter your OAuth Client credentials from Google Cloud Console (YouTube Data API v3 enabled).</p>
+        <label>Client ID <input id="yt-client-id" placeholder="xxxx.apps.googleusercontent.com"></label>
+        <label>Client Secret <input id="yt-client-secret" type="password" placeholder="GOCSPX-xxxx"></label>
+        <label>Redirect URI <input id="yt-redirect-uri" placeholder="http://localhost:3000/api/youtube/callback" readonly></label>
+        <div class="inline">
+          <button type="button" class="ghost" id="yt-save-creds">Save Credentials</button>
+          <button type="button" class="primary" id="yt-connect-btn">Connect YouTube Channel</button>
+          <button type="button" class="ghost danger" id="yt-disconnect-btn" hidden>Disconnect Channel</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Quick Setup Guide</legend>
+        <ol class="guide-steps">
+          <li>Open <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">Google Cloud Console</a> and create a project.</li>
+          <li>Go to <strong>APIs & Services &gt; Library</strong> and enable <strong>YouTube Data API v3</strong>.</li>
+          <li>Under <strong>OAuth consent screen</strong>, choose External, set User Support Email, and add scope <code>.../auth/youtube.upload</code>. (Add your email as a Test User).</li>
+          <li>Under <strong>Credentials</strong>, create <strong>OAuth Client ID</strong> (Web application) with Authorized Redirect URI <code>http://localhost:3000/api/youtube/callback</code>.</li>
+          <li>Paste the Client ID and Client Secret above and click <strong>Connect</strong>.</li>
+        </ol>
+      </fieldset>
+    </div>
+  </dialog>
+
+  <!-- YouTube Upload & Schedule Modal -->
+  <dialog id="yt-upload-modal" class="pop">
+    <form method="dialog" class="pop-head">
+      <h3>Upload & Schedule YouTube Short</h3>
+      <button class="ghost" value="close">Close</button>
+    </form>
+    <div class="pop-body">
+      <div id="yt-upload-status" class="note" style="margin-bottom:12px"></div>
+      <div id="yt-channel-badge" class="yt-badge-bar"></div>
+
+      <label>Short Title (max 100 characters, auto-adds #Shorts)
+        <input id="ytu-title" maxlength="100">
+      </label>
+
+      <label>Description & Tags (auto-filled from AI analysis)
+        <textarea id="ytu-desc" rows="4"></textarea>
+      </label>
+
+      <label>Hashtags (space or comma separated)
+        <input id="ytu-tags">
+      </label>
+
+      <fieldset>
+        <legend>Publishing Schedule</legend>
+        <div class="two">
+          <label>Visibility / Mode
+            <select id="ytu-mode">
+              <option value="schedule">Schedule for predefined time</option>
+              <option value="public">Publish immediately (Public)</option>
+              <option value="unlisted">Publish as Unlisted</option>
+              <option value="private">Upload as Private</option>
+            </select>
+          </label>
+          <div id="ytu-time-box">
+            <label>Predefined Time (Native YouTube Cloud Schedule)
+              <input type="datetime-local" id="ytu-time">
+            </label>
+          </div>
+        </div>
+        <div id="ytu-quick-times" class="inline">
+          <button type="button" class="ghost" data-offset="2">In 2 hours</button>
+          <button type="button" class="ghost" data-preset="tonight">Tonight 8:00 PM</button>
+          <button type="button" class="ghost" data-preset="tomorrow_morning">Tomorrow 10:00 AM</button>
+          <button type="button" class="ghost" data-preset="tomorrow_evening">Tomorrow 6:00 PM</button>
+        </div>
+        <p class="note">When scheduled, YouTube holds the Short as private and automatically publishes it at the exact predefined time on their cloud servers.</p>
+      </fieldset>
+
+      <div class="bar" id="ytu-bar" hidden><i style="background:#ff0000"></i></div>
+      <div id="ytu-msg" class="note"></div>
+
+      <div class="inline" style="margin-top:16px;justify-content:flex-end">
+        <button type="button" class="primary yt-red" id="ytu-submit">Upload & Schedule Short</button>
+      </div>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/app.js" type="module"></script>
 </body>

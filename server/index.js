@@ -17,6 +17,14 @@ import { sanitizeSettings } from './settings.js';
 import { speak, ttsEnabled } from './tts.js';
 import { tokenLimits, addUsage, blankUsage } from './usage.js';
 import { youtubeEnabled, validateYouTubeUrl } from './youtube.js';
+import {
+  getYouTubeStatus,
+  getYouTubeAuthUrl,
+  exchangeYouTubeCode,
+  disconnectYouTube,
+  saveYouTubeCredentials,
+  uploadShortToYouTube,
+} from './youtube_api.js';
 
 const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
 const PORT = Number(process.env.PORT || 3000);
@@ -121,6 +129,7 @@ route('GET', '/api/config', async (req, res) => {
     llm: llmEnabled(),
     tts: ttsEnabled(),
     youtube: youtubeEnabled(),
+    youtubeStatus: getYouTubeStatus(),
     llmProvider: llmProvider(),
     maxDurationMin: Math.round(maxDurationSec() / 60),
     aspects: Object.keys(SIZES),
@@ -358,6 +367,125 @@ route('POST', '/api/clips/(\\w+)/proofread', async (req, res, m) => {
   } catch (e) {
     fail(res, 400, e.message);
   }
+});
+
+route('GET', '/api/youtube/status', async (req, res) => {
+  send(res, 200, getYouTubeStatus());
+});
+
+route('POST', '/api/youtube/credentials', async (req, res) => {
+  const b = await readJSON(req);
+  saveYouTubeCredentials({
+    clientId: b.clientId,
+    clientSecret: b.clientSecret,
+    redirectUri: b.redirectUri,
+  });
+  send(res, 200, getYouTubeStatus());
+});
+
+route('GET', '/api/youtube/auth-url', async (req, res, m, url) => {
+  try {
+    const host = req.headers.host;
+    const redirect = url.searchParams.get('redirectUri');
+    const authData = getYouTubeAuthUrl(host, redirect);
+    send(res, 200, authData);
+  } catch (err) {
+    fail(res, 400, err.message);
+  }
+});
+
+route('GET', '/api/youtube/callback', async (req, res, m, url) => {
+  const code = url.searchParams.get('code');
+  const err = url.searchParams.get('error');
+  if (err) {
+    res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end(`<h2>YouTube authorization failed</h2><p>${err}</p><p><a href="/">Back to Cliphunt</a></p>`);
+  }
+  if (!code) {
+    res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end('<h2>Missing code parameter</h2><p><a href="/">Back to Cliphunt</a></p>');
+  }
+  try {
+    const host = req.headers.host;
+    const proto = host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https';
+    const redirectUri = `${proto}://${host}/api/youtube/callback`;
+    await exchangeYouTubeCode(code, redirectUri);
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><html><body style="font-family:sans-serif;padding:30px;text-align:center"><h2>YouTube Connected!</h2><p>Your channel is now linked to Cliphunt.</p><script>if (window.opener) { window.opener.postMessage({ type: 'youtube-connected' }, '*'); window.close(); } else { window.location.href = '/?youtube=connected'; }</script></body></html>`);
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(`<h2>Connection error</h2><p>${e.message}</p><p><a href="/">Back to Cliphunt</a></p>`);
+  }
+});
+
+route('POST', '/api/youtube/disconnect', async (req, res) => {
+  disconnectYouTube();
+  send(res, 200, getYouTubeStatus());
+});
+
+route('POST', '/api/clips/(\\w+)/youtube', async (req, res, m) => {
+  const c = getClip(res, m[1]);
+  if (!c) return;
+  if (!c.outputFile) {
+    return fail(res, 400, 'Render the clip first before uploading to YouTube');
+  }
+  if (c.youtube?.status === 'uploading') {
+    return fail(res, 409, 'This clip is currently being uploaded');
+  }
+
+  const b = await readJSON(req);
+  const filePath = path.join(projectDir(c.projectId), c.outputFile);
+  if (!fs.existsSync(filePath)) {
+    return fail(res, 404, 'Rendered video file not found on disk');
+  }
+
+  c.youtube = {
+    status: 'uploading',
+    progress: 0,
+    publishAt: b.publishAt || null,
+    privacyStatus: b.privacyStatus || (b.publishAt ? 'private' : 'public'),
+    error: null,
+  };
+  save();
+
+  // Asynchronous background upload
+  uploadShortToYouTube({
+    filePath,
+    title: b.title || c.title,
+    description: b.description || c.description,
+    hashtags: Array.isArray(b.hashtags) ? b.hashtags : c.hashtags || [],
+    publishAt: b.publishAt || null,
+    privacyStatus: b.privacyStatus || 'public',
+    onProgress: (pct) => {
+      if (c.youtube && c.youtube.status === 'uploading') {
+        c.youtube.progress = pct;
+        save();
+      }
+    },
+  }).then((result) => {
+    c.youtube = {
+      status: 'uploaded',
+      progress: 100,
+      videoId: result.id,
+      videoUrl: result.videoUrl,
+      publishAt: result.publishAt,
+      privacyStatus: result.privacyStatus,
+      uploadedAt: Date.now(),
+      error: null,
+    };
+    save();
+  }).catch((err) => {
+    console.error('[youtube upload]', err);
+    c.youtube = {
+      status: 'error',
+      progress: 0,
+      error: err.message.slice(-600),
+      uploadedAt: null,
+    };
+    save();
+  });
+
+  send(res, 200, publicClip(c));
 });
 
 // ---------- dispatcher ----------

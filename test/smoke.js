@@ -20,7 +20,7 @@ execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size
   '-f', 'lavfi', '-i', 'sine=f=300:duration=60', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', video]);
 
 const server = spawn('node', ['server/index.js'], {
-  env: { ...process.env, PORT, DATA_DIR: path.join(tmp, 'data'), TRANSCRIBE_PROVIDER: 'mock', ANTHROPIC_API_KEY: '', LLM_PROVIDER: 'none' },
+  env: { ...process.env, PORT, DATA_DIR: path.join(tmp, 'data'), TRANSCRIBE_PROVIDER: 'mock', ANTHROPIC_API_KEY: '', LLM_PROVIDER: 'none', YOUTUBE_MOCK: '1' },
   stdio: 'inherit',
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -62,6 +62,24 @@ try {
   const out = path.join(tmp, 'data/projects', p.id, done.outputFile);
   if (!fs.existsSync(out) || fs.statSync(out).size < 10000) throw new Error('Rendered file missing or empty');
   console.log('render ok:', out);
+
+  const ytStatus = await j('/api/youtube/status');
+  if (!ytStatus.connected) throw new Error('YouTube status check failed');
+  const futureSchedule = new Date(Date.now() + 86400000).toISOString();
+  await post(`/api/clips/${c.id}/youtube`, {
+    title: 'Smoke Test Short',
+    description: 'Automated test short description',
+    hashtags: ['test', 'smoke'],
+    publishAt: futureSchedule,
+  });
+  const ytDone = await waitFor(async () => {
+    const x = (await j(`/api/projects/${p.id}`)).clips.find((k) => k.id === c.id);
+    if (x.youtube?.status === 'error') throw new Error(x.youtube.error);
+    return x.youtube?.status === 'uploaded' && x;
+  }, 'youtube upload');
+  if (!ytDone.youtube?.videoUrl) throw new Error('YouTube video URL missing');
+  console.log('youtube upload & schedule ok:', ytDone.youtube.videoUrl, 'publishAt:', ytDone.youtube.publishAt);
+
   console.log('PASS');
 } catch (e) {
   console.error('FAIL:', e.message);
