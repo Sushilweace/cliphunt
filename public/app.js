@@ -67,7 +67,13 @@ async function init() {
   if (note) note.textContent = `Each project can spend ${Number(lim.project || 0).toLocaleString()} analysis tokens. One clip's post copy is capped at ${Number(lim.clip || 0).toLocaleString()}. The Clips field is how many moments are analyzed.`;
   $('#aspect').innerHTML = c.aspects.map((a) => `<option>${a}</option>`).join('');
   await loadProjects();
-  renderMain();
+  if (!state.pid && state.projects.length) {
+    const hash = window.location.hash.slice(1);
+    const target = state.projects.find((p) => p.id === hash) || state.projects[0];
+    if (target) await selectProject(target.id);
+  } else {
+    renderMain();
+  }
   setInterval(tick, 1500);
 }
 
@@ -93,9 +99,18 @@ $('#plist').addEventListener('click', (e) => {
   const li = e.target.closest('li[data-id]');
   if (li) selectProject(li.dataset.id);
 });
+window.addEventListener('hashchange', () => {
+  const hash = window.location.hash.slice(1);
+  if (hash && hash !== state.pid && state.projects?.some((p) => p.id === hash)) {
+    selectProject(hash);
+  }
+});
 
 async function selectProject(id) {
   state.pid = id;
+  if (window.location.hash.slice(1) !== id) {
+    window.location.hash = id;
+  }
   closeEditor();
   state.project = await api(`/api/projects/${id}`);
   renderList();
@@ -245,15 +260,15 @@ function cardHTML(c) {
   const tok = c.usage?.total ? ` · ${c.usage.total.toLocaleString()} tokens` : '';
   const ytAction = c.outputFile
     ? (c.youtube?.videoUrl
-        ? `<a class="ghost yt-red" target="_blank" rel="noreferrer" href="${c.youtube.videoUrl}">Short ↗</a>`
-        : `<button type="button" class="ghost yt-red" data-yt="${c.id}">${c.youtube?.status === 'uploaded' ? 'YouTube' : 'Post Short'}</button>`)
+        ? `<a class="ghost yt-red" target="_blank" rel="noreferrer" href="${c.youtube.videoUrl}" title="Open Short on YouTube">Short ↗</a>`
+        : `<button type="button" class="ghost yt-red" data-yt="${c.id}" title="${c.youtube?.status === 'uploading' ? 'Uploading Short…' : 'Upload & Schedule YouTube Short'}">${c.youtube?.status === 'uploading' ? 'Uploading…' : (c.youtube?.status === 'uploaded' ? 'YouTube' : 'Post Short')}</button>`)
     : '';
 
   return `<article class="clip" data-clip="${c.id}">
     <button class="th" data-edit="${c.id}" aria-label="Edit ${esc(c.title)}"><img src="${thumbOf(p, c)}" alt="" loading="lazy"><span class="score">${c.score}</span>${st}</button>
     <div class="body"><h3>${esc(c.title)}</h3><div class="range">${fmt(c.segments[0].start)} to ${fmt(c.segments[c.segments.length - 1].end)} · ${Math.round(dur)}s · ${c.aspect}${parts}${tok}</div>
     <div class="why">${esc(c.reason)}</div>
-    <div class="acts"><button class="ghost" data-edit="${c.id}">Edit</button><button class="ghost" data-react="${c.id}">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}">Download</a>` : ''}${ytAction}</div></div></article>`;
+    <div class="acts"><button class="ghost" data-edit="${c.id}" title="Edit clip">Edit</button><button class="ghost" data-react="${c.id}" title="Record reaction">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}" title="Download rendered clip">Download</a>` : ''}${ytAction}</div></div></article>`;
 }
 function updateCards() {
   const g = $('#grid');
