@@ -3,11 +3,14 @@ import path from 'node:path';
 import { db, save, uid, projectDir, dirs } from './store.js';
 import { probe, extractWav, energyPerSecond, makeProxy, grabFrame } from './ffmpeg.js';
 import { transcribe } from './transcribe.js';
-import { findHighlights } from './highlights.js';
+import { findHighlights, proofreadCaption } from './highlights.js';
+import { clipWords } from './captions.js';
+import { llmEnabled } from './llm.js';
 import { addUsage, blankUsage, tokenLimits } from './usage.js';
 import { downloadYouTube, youtubeDuration } from './youtube.js';
 import { renderQueue } from './queue.js';
 import { renderClip } from './render.js';
+import { registerTask, unregisterTask } from './tasks.js';
 
 export const maxDurationSec = () => Number(process.env.MAX_DURATION_MIN || 120) * 60;
 
@@ -51,8 +54,14 @@ function step(p, stage, progress) {
 
 export async function runAnalysis(projectId) {
   const p = db.projects[projectId];
+  if (!p) return;
   const dir = projectDir(projectId);
+  const ctrl = new AbortController();
+  const signal = ctrl.signal;
+  registerTask(`analysis-${projectId}`, ctrl, { type: 'analysis', targetId: projectId });
+
   try {
+    p.cancelled = false;
     p.status = 'processing';
     fs.mkdirSync(dir, { recursive: true });
 
@@ -62,9 +71,10 @@ export async function runAnalysis(projectId) {
     if (!src) {
       step(p, 'Getting the video', 2);
       if (p.source.type === 'youtube') {
-        const known = await youtubeDuration(p.source.url);
+        const known = await youtubeDuration(p.source.url, { signal });
         if (known) tooLong(known);
-        p.source.file = await downloadYouTube(p.source.url, dir);
+        if (p.cancelled || signal.aborted) throw new Error('Analysis cancelled by user');
+        p.source.file = await downloadYouTube(p.source.url, dir, { signal });
       } else {
         const up = db.uploads[p.source.uploadId];
         if (!up || !fs.existsSync(up.path)) throw new Error('Uploaded file not found');
@@ -75,7 +85,8 @@ export async function runAnalysis(projectId) {
       }
       src = path.join(dir, p.source.file);
     }
-    const info = await probe(src);
+    if (p.cancelled || signal.aborted) throw new Error('Analysis cancelled by user');
+    const info = await probe(src, { signal });
     if (!info.hasVideo) throw new Error('This file has no video stream');
     tooLong(info.duration);
     p.duration = info.duration;
@@ -89,9 +100,10 @@ export async function runAnalysis(projectId) {
     const proxyPath = path.join(dir, 'proxy.mp4');
     if (!fs.existsSync(proxyPath)) {
       step(p, 'Making a preview copy', 8);
-      await makeProxy(src, proxyPath, (x) => step(p, 'Making a preview copy', 8 + x * 12), info.duration);
+      await makeProxy(src, proxyPath, (x) => step(p, 'Making a preview copy', 8 + x * 12), info.duration, { signal });
     }
     p.proxy = 'proxy.mp4';
+    if (p.cancelled || signal.aborted) throw new Error('Analysis cancelled by user');
 
     // 3. Audio + transcript. transcript.json is kept so a failed highlight step does not re-transcribe.
     const transcriptPath = path.join(dir, 'transcript.json');
@@ -101,18 +113,20 @@ export async function runAnalysis(projectId) {
     if (info.hasAudio && (!transcript || !energy.length)) {
       step(p, 'Reading the audio', 22);
       const wav = path.join(dir, 'audio.wav');
-      await extractWav(src, wav);
+      await extractWav(src, wav, { signal });
+      if (p.cancelled || signal.aborted) throw new Error('Analysis cancelled by user');
       if (!energy.length) {
-        energy = await energyPerSecond(wav);
+        energy = await energyPerSecond(wav, { signal });
         fs.writeFileSync(energyPath, JSON.stringify(energy));
       }
       if (!transcript) {
         step(p, 'Transcribing speech', 30);
-        transcript = await transcribe(wav, dir, info.duration, (x) => step(p, 'Transcribing speech', 30 + x * 35));
+        transcript = await transcribe(wav, dir, info.duration, (x) => step(p, 'Transcribing speech', 30 + x * 35), { signal });
         if (transcript) fs.writeFileSync(transcriptPath, JSON.stringify(transcript));
       }
       fs.rmSync(wav, { force: true });
     }
+    if (p.cancelled || signal.aborted) throw new Error('Analysis cancelled by user');
     p.hasTranscript = !!transcript;
     p.language = transcript?.language || null;
 
@@ -152,11 +166,12 @@ export async function runAnalysis(projectId) {
     step(p, 'Preparing clips', 85);
     fs.mkdirSync(path.join(dir, 'thumbs'), { recursive: true });
     let i = 0;
+    const createdClips = [];
     for (const c of clips) {
       const id = uid();
       const thumb = `thumbs/${id}.jpg`;
       await grabFrame(src, c.start + Math.min(1.5, (c.end - c.start) / 2), path.join(dir, thumb)).catch(() => {});
-      db.clips[id] = {
+      const clipRecord = {
         id,
         projectId,
         title: c.title,
@@ -175,8 +190,40 @@ export async function runAnalysis(projectId) {
         voice: null,
         createdAt: Date.now(),
       };
-      step(p, 'Preparing clips', 85 + (++i / clips.length) * 14);
+      db.clips[id] = clipRecord;
+      createdClips.push(clipRecord);
+      step(p, 'Preparing clips', 85 + (++i / clips.length) * 8);
     }
+
+    // Auto-fix captions with AI (Method 1: Automatic speech-to-text cleanup)
+    const autoFixCaptions = process.env.AUTO_FIX_CAPTIONS !== '0' && llmEnabled() && transcript?.segments?.length;
+    if (autoFixCaptions) {
+      step(p, 'Polishing captions with AI', 94);
+      await Promise.all(
+        createdClips.map(async (c) => {
+          try {
+            const rawWords = clipWords(transcript, c.segments);
+            const rawText = rawWords.map((w) => w.w).join(' ').trim();
+            if (rawText) {
+              const fixed = await proofreadCaption(rawText);
+              if (fixed?.text && fixed.text !== rawText) {
+                c.settings.captions.textOverride = fixed.text;
+                if (/[\u0900-\u097F]/.test(fixed.text)) {
+                  c.settings.captions.font = 'Nirmala UI';
+                }
+                if (fixed.usage) {
+                  c.usage = addUsage(c.usage || blankUsage(), fixed.usage);
+                  p.usage = addUsage(p.usage || blankUsage(), fixed.usage);
+                }
+              }
+            }
+          } catch (err) {
+            console.warn(`[captions] Auto-fix caption failed for clip ${c.id}:`, err.message);
+          }
+        })
+      );
+    }
+
     p.status = 'ready';
     p.stage = 'Ready';
     p.progress = 100;
@@ -184,10 +231,20 @@ export async function runAnalysis(projectId) {
     save();
     if (process.env.AUTO_RENDER === '1') queueTopRender(projectId);
   } catch (e) {
+    if (p.cancelled || signal.aborted) {
+      console.log(`[analysis] Project ${projectId} cancelled by user`);
+      p.status = 'cancelled';
+      p.stage = 'Cancelled by user';
+      p.error = null;
+      save();
+      return;
+    }
     console.error('[analysis]', e);
     p.status = 'error';
     p.error = e.message;
     save();
+  } finally {
+    unregisterTask(`analysis-${projectId}`);
   }
 }
 
@@ -201,16 +258,20 @@ function queueTopRender(projectId) {
   save();
   renderQueue(async () => {
     if (!db.clips[top.id] || top.cancelled) return;
+    const ctrl = new AbortController();
+    registerTask(`render-${top.id}`, ctrl, { type: 'render', targetId: top.id, projectId });
     top.status = 'rendering';
     try {
-      await renderClip(top.id);
+      await renderClip(top.id, { signal: ctrl.signal });
     } catch (e) {
-      if (!db.clips[top.id] || top.cancelled) return;
+      if (!db.clips[top.id] || top.cancelled || ctrl.signal.aborted) return;
       top.status = 'error';
       top.error = e.message.slice(-600);
       save();
+    } finally {
+      unregisterTask(`render-${top.id}`);
     }
-  });
+  }, top.id);
 }
 
 const round = (n) => Math.round(n * 100) / 100;

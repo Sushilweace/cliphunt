@@ -31,7 +31,7 @@ const setPath = (o, p, v) => {
   ks.reduce((a, k) => (a[k] ??= {}), o)[last] = v;
 };
 
-const state = { config: {}, music: [], projects: [], pid: null, project: null, draft: null, origText: '', previewMode: 'original', saveTimer: null, recorder: null };
+const state = { config: {}, music: [], projects: [], pid: null, project: null, draft: null, origText: '', previewMode: 'original', saveTimer: null, recorder: null, tasks: [] };
 
 function toast(msg, bad = false) {
   const t = $('#toast');
@@ -42,6 +42,135 @@ function toast(msg, bad = false) {
   toast.t = setTimeout(() => (t.hidden = true), bad ? 6000 : 2600);
 }
 
+// ---------- background tasks UI ----------
+async function fetchTasks() {
+  try {
+    const res = await api('/api/tasks');
+    state.tasks = res.tasks || [];
+    renderTasksBadge();
+    if ($('#tasks-modal')?.open) {
+      renderTasksModal();
+    }
+  } catch {}
+}
+
+function renderTasksBadge() {
+  const btn = $('#tasks-btn');
+  const label = $('#tasks-label');
+  if (!btn || !label) return;
+  const count = state.tasks?.length || 0;
+  label.textContent = `Tasks (${count})`;
+  if (count > 0) {
+    btn.classList.add('has-active');
+    btn.title = `${count} background task(s) active. Click to view or cancel.`;
+  } else {
+    btn.classList.remove('has-active');
+    btn.title = 'No active background tasks';
+  }
+}
+
+function renderTasksModal() {
+  const cont = $('#tasks-list-container');
+  const cancelAllBtn = $('#tasks-cancel-all-btn');
+  const sub = $('#tasks-count-sub');
+  if (!cont) return;
+
+  const tasks = state.tasks || [];
+  if (sub) {
+    sub.textContent = tasks.length
+      ? `${tasks.length} task(s) currently active or queued in background`
+      : 'All background tasks idle';
+  }
+  if (cancelAllBtn) {
+    cancelAllBtn.disabled = tasks.length === 0;
+  }
+
+  if (!tasks.length) {
+    cont.innerHTML = `
+      <div class="tasks-empty">
+        <h4>No background tasks running</h4>
+        <p class="note">When videos are being analyzed or clips are rendering, they will appear here with live progress and cancel buttons.</p>
+      </div>`;
+    return;
+  }
+
+  cont.innerHTML = `
+    <div class="tasks-list">
+      ${tasks
+        .map((t) => {
+          const isAnalysis = t.type === 'analysis';
+          const badgeClass = isAnalysis ? 'analysis' : 'render';
+          const badgeText = isAnalysis ? 'Analysis' : 'Render';
+          const displayTitle = t.title || (isAnalysis ? 'Project Video' : 'Clip');
+          return `
+            <div class="task-card" data-task-id="${esc(t.id)}">
+              <div class="task-card-info">
+                <div class="task-card-head">
+                  <span class="task-badge ${badgeClass}">${badgeText}</span>
+                  <span class="task-card-title">${esc(displayTitle)}</span>
+                </div>
+                <div class="task-card-stage">
+                  <span>${esc(t.stage)}</span>
+                  <span>·</span>
+                  <strong>${t.progress}%</strong>
+                </div>
+                <div class="bar"><i style="width:${Math.max(3, t.progress)}%"></i></div>
+              </div>
+              <div class="task-actions">
+                <button type="button" class="ghost danger task-cancel-btn" data-cancel-task="${esc(t.id)}" title="Stop this background task">✕ Stop</button>
+              </div>
+            </div>`;
+        })
+        .join('')}
+    </div>`;
+}
+
+function wireBackgroundTasks() {
+  const btn = $('#tasks-btn');
+  const modal = $('#tasks-modal');
+  const cancelAllBtn = $('#tasks-cancel-all-btn');
+  const cont = $('#tasks-list-container');
+
+  btn?.addEventListener('click', () => {
+    fetchTasks();
+    modal?.showModal();
+    renderTasksModal();
+  });
+
+  cancelAllBtn?.addEventListener('click', async () => {
+    if (!confirm('Are you sure you want to stop and cancel ALL running and queued background tasks?')) return;
+    cancelAllBtn.disabled = true;
+    try {
+      const res = await post('/api/tasks/cancel-all', {});
+      toast(`Stopped ${res.cancelledCount || 0} background task(s)`);
+      await fetchTasks();
+      await loadProjects();
+      if (state.pid) await selectProject(state.pid);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      cancelAllBtn.disabled = false;
+    }
+  });
+
+  cont?.addEventListener('click', async (e) => {
+    const cancelBtn = e.target.closest('[data-cancel-task]');
+    if (!cancelBtn) return;
+    const taskId = cancelBtn.dataset.cancelTask;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Stopping…';
+    try {
+      await post(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {});
+      toast('Task cancelled successfully');
+      await fetchTasks();
+      await loadProjects();
+      if (state.pid) await selectProject(state.pid);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+}
+
 // ---------- init ----------
 async function init() {
   if (window.location.search.includes('youtube=connected')) {
@@ -49,6 +178,7 @@ async function init() {
     window.history.replaceState({}, document.title, window.location.pathname);
   }
 
+  wireBackgroundTasks();
   [state.config, state.music] = await Promise.all([api('/api/config'), api('/api/music')]);
   const c = state.config;
   const ytChip = `<button type="button" class="chip ${c.youtubeStatus?.connected ? 'on yt-connected' : 'yt-disconnected'}" id="yt-status-chip">YouTube: ${c.youtubeStatus?.connected ? (c.youtubeStatus.channel?.customUrl || c.youtubeStatus.channel?.title || 'Connected') : 'Connect'}</button>`;
@@ -60,6 +190,8 @@ async function init() {
 
   $('#yt-status-chip')?.addEventListener('click', openYouTubeSettingsModal);
   wireYouTubeModals();
+  wireYouTubeCookies();
+  fetchYouTubeCookiesInfo();
 
   if (!c.youtube) $('[data-src=youtube]').hidden = true;
   const lim = c.tokenLimits || {};
@@ -90,7 +222,7 @@ function renderList() {
   }
   ul.innerHTML = state.projects
     .map((p) => {
-      const meta = p.status === 'ready' ? `${p.clipCount} clips` : p.status === 'error' ? 'Failed' : `${p.stage} ${p.progress}%`;
+      const meta = p.status === 'ready' ? `${p.clipCount} clips` : p.status === 'cancelled' ? 'Cancelled' : p.status === 'error' ? 'Failed' : `${p.stage} ${p.progress}%`;
       return `<li data-id="${p.id}" class="${p.id === state.pid ? 'on' : ''}"><span class="name">${esc(p.title || 'Untitled')}</span><span class="meta">${esc(meta)}</span></li>`;
     })
     .join('');
@@ -119,6 +251,7 @@ async function selectProject(id) {
 
 async function tick() {
   try {
+    await fetchTasks();
     const busy = state.projects.some((p) => p.status === 'processing' || p.status === 'queued');
     if (busy) await loadProjects();
     if (!state.pid) return;
@@ -218,10 +351,23 @@ function renderMain() {
     return;
   }
   const tokens = p.usage?.total ? ` · ${(p.usage.total).toLocaleString()} analysis tokens${state.config.tokenLimits?.project ? ` / ${Number(state.config.tokenLimits.project).toLocaleString()}` : ''}` : '';
-  const head = `<div class="head"><div><h2>${esc(p.title || 'Untitled')}</h2><p class="sub">${p.duration ? `${fmt(p.duration)} long` : ''}${p.language ? ` · ${esc(p.language)}` : ''}${p.method ? ` · picked by ${p.method === 'llm' ? 'AI' : p.method}` : ''}${tokens}</p></div><button class="ghost danger" id="del">Delete project</button></div>`;
+  const head = `<div class="head"><div><h2>${esc(p.title || 'Untitled')}</h2><p class="sub">${p.duration ? `${fmt(p.duration)} long` : ''}${p.language ? ` · ${esc(p.language)}` : ''}${p.method ? ` · picked by ${p.method === 'llm' ? 'AI' : p.method}` : ''}${tokens}</p></div><div style="display:flex;gap:8px;align-items:center">${p.hasTranscript && state.config.llm && p.clips?.length ? `<button class="ghost" id="fix-all-captions" title="Automatically fix speech-to-text typos across all clips">✨ AI Fix All Captions</button>` : ''}<button class="ghost danger" id="del">Delete project</button></div></div>`;
   let body = '';
-  if (p.status === 'error') body = `<div class="err">${esc(p.error)}</div>`;
-  else if (p.status !== 'ready') body = `<div class="progress"><strong>${esc(p.stage)}</strong><div class="bar"><i style="width:${p.progress}%"></i></div><p class="note">This runs in the background. You can leave this page.</p></div>`;
+  if (p.status === 'error') {
+    const isYtAuthError = /bot verification|cookies|LOGIN_REQUIRED|Sign in to confirm|Age Restriction|verification required/i.test(p.error || '');
+    body = `<div class="err" style="border-radius:10px;padding:16px;line-height:1.5">
+      <div style="display:flex;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--danger,#c6283e);margin-bottom:8px">
+        <span>⚠️ Video Acquisition Error</span>
+      </div>
+      <div style="white-space:pre-wrap;margin-bottom:14px;color:var(--ink);font-size:13.5px">${esc(p.error)}</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:10px;border-top:1px solid rgba(198,40,62,0.2)">
+        <button type="button" class="primary" id="retry-analysis-btn" style="margin:0;padding:6px 14px;font-size:13px">🔄 Retry Video Analysis</button>
+        ${isYtAuthError ? `<button type="button" class="ghost" id="err-cookies-setup-btn" style="padding:6px 14px;font-size:13px">⚙️ Cookies Setup</button><button type="button" class="ghost" id="err-switch-upload-btn" style="padding:6px 14px;font-size:13px">📁 Switch to File Upload</button>` : ''}
+      </div>
+    </div>`;
+  }
+  else if (p.status === 'cancelled') body = `<div class="progress" style="border-color:#fca5a5;background:#fff5f5"><strong style="color:var(--danger)">Analysis was cancelled.</strong><p class="note">You can delete this project or start a new video above.</p></div>`;
+  else if (p.status !== 'ready') body = `<div class="progress"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:6px"><strong>${esc(p.stage)}</strong><button type="button" class="ghost danger" id="cancel-analysis" style="padding:4px 10px;font-size:12px;font-weight:600" title="Stop video analysis">✕ Cancel Analysis</button></div><div class="bar"><i style="width:${p.progress}%"></i></div><p class="note">This runs in the background. You can leave this page or cancel anytime.</p></div>`;
   else {
     const hot = Math.max(...p.clips.map((c) => c.score));
     body = `<div class="ruler" aria-label="Where the clips sit in the original video">${p.clips
@@ -229,6 +375,70 @@ function renderMain() {
       .join('')}</div><div class="ticks"><span>0:00</span><span>${fmt(p.duration)}</span></div><div class="grid" id="grid">${p.clips.map(cardHTML).join('')}</div>`;
   }
   m.innerHTML = head + body;
+
+  const retryBtn = $('#retry-analysis-btn');
+  if (retryBtn) {
+    retryBtn.onclick = async () => {
+      retryBtn.disabled = true;
+      retryBtn.textContent = 'Retrying…';
+      try {
+        await post(`/api/projects/${p.id}/retry`, {});
+        toast('Retrying video analysis…');
+        await loadProjects();
+        await selectProject(p.id);
+      } catch (err) {
+        toast(err.message, true);
+        retryBtn.disabled = false;
+        retryBtn.textContent = '🔄 Retry Video Analysis';
+      }
+    };
+  }
+  const errCookiesBtn = $('#err-cookies-setup-btn');
+  if (errCookiesBtn) {
+    errCookiesBtn.onclick = () => openYouTubeCookiesModal();
+  }
+  const errUploadBtn = $('#err-switch-upload-btn');
+  if (errUploadBtn) {
+    errUploadBtn.onclick = () => {
+      const uploadTab = document.querySelector('[data-src="upload"]');
+      if (uploadTab) uploadTab.click();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+  const cancelAnalysisBtn = $('#cancel-analysis');
+  if (cancelAnalysisBtn) {
+    cancelAnalysisBtn.onclick = async () => {
+      if (!confirm('Cancel video analysis for this project?')) return;
+      cancelAnalysisBtn.disabled = true;
+      cancelAnalysisBtn.textContent = 'Cancelling…';
+      try {
+        await post(`/api/projects/${p.id}/cancel`, {});
+        toast('Analysis cancelled');
+        await fetchTasks();
+        await selectProject(p.id);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  }
+  const fixAllBtn = $('#fix-all-captions');
+  if (fixAllBtn) {
+    fixAllBtn.onclick = async () => {
+      fixAllBtn.disabled = true;
+      const old = fixAllBtn.textContent;
+      fixAllBtn.textContent = 'Fixing captions with AI…';
+      try {
+        const r = await post(`/api/projects/${p.id}/proofread-captions`, {});
+        await selectProject(p.id);
+        toast(`Fixed captions for ${r.fixedCount} clip(s) with AI!`);
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        fixAllBtn.disabled = false;
+        fixAllBtn.textContent = old;
+      }
+    };
+  }
   $('#del').onclick = async () => {
     if (!confirm('Delete this project and all its clips?')) return;
     await api(`/api/projects/${p.id}`, { method: 'DELETE' });
@@ -263,19 +473,37 @@ function cardHTML(c) {
         ? `<a class="ghost yt-red" target="_blank" rel="noreferrer" href="${c.youtube.videoUrl}" title="Open Short on YouTube">Short ↗</a>`
         : `<button type="button" class="ghost yt-red" data-yt="${c.id}" title="${c.youtube?.status === 'uploading' ? 'Uploading Short…' : 'Upload & Schedule YouTube Short'}">${c.youtube?.status === 'uploading' ? 'Uploading…' : (c.youtube?.status === 'uploaded' ? 'YouTube' : 'Post Short')}</button>`)
     : '';
+  const cancelClipBtn = (c.status === 'rendering' || c.status === 'queued')
+    ? `<button type="button" class="ghost danger" data-cancel-clip="${c.id}" title="Stop rendering this clip">✕ Stop</button>`
+    : '';
 
   return `<article class="clip" data-clip="${c.id}">
     <button class="th" data-edit="${c.id}" aria-label="Edit ${esc(c.title)}"><img src="${thumbOf(p, c)}" alt="" loading="lazy"><span class="score">${c.score}</span>${st}</button>
     <div class="body"><h3>${esc(c.title)}</h3><div class="range">${fmt(c.segments[0].start)} to ${fmt(c.segments[c.segments.length - 1].end)} · ${Math.round(dur)}s · ${c.aspect}${parts}${tok}</div>
     <div class="why">${esc(c.reason)}</div>
-    <div class="acts"><button class="ghost" data-edit="${c.id}" title="Edit clip">Edit</button><button class="ghost" data-react="${c.id}" title="Record reaction">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}" title="Download rendered clip">Download</a>` : ''}${ytAction}</div></div></article>`;
+    <div class="acts"><button class="ghost" data-edit="${c.id}" title="Edit clip">Edit</button><button class="ghost" data-react="${c.id}" title="Record reaction">React</button>${c.outputFile ? `<a class="ghost" download href="/media/${p.id}/${c.outputFile}?v=${c.renderedAt}" title="Download rendered clip">Download</a>` : ''}${ytAction}${cancelClipBtn}</div></div></article>`;
 }
 function updateCards() {
   const g = $('#grid');
   if (!g) return;
   g.innerHTML = state.project.clips.map(cardHTML).join('');
 }
-$('#main').addEventListener('click', (e) => {
+$('#main').addEventListener('click', async (e) => {
+  const cc = e.target.closest('[data-cancel-clip]');
+  if (cc) {
+    const clipId = cc.dataset.cancelClip;
+    cc.disabled = true;
+    cc.textContent = 'Stopping…';
+    try {
+      await post(`/api/clips/${clipId}/cancel`, {});
+      toast('Render cancelled');
+      await fetchTasks();
+      if (state.pid) await selectProject(state.pid);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
   const yt = e.target.closest('[data-yt]');
   if (yt) { openYouTubeUploadModal(yt.dataset.yt); return; }
   const r = e.target.closest('[data-react]');
@@ -315,114 +543,571 @@ function closeEditor() {
   $('#editor').innerHTML = '';
 }
 
-const sel = (path, options, labels = {}) => `<select data-k="${path}">${options.map((o) => `<option value="${o}" ${getPath(state.draft, path) === o ? 'selected' : ''}>${labels[o] || o}</option>`).join('')}</select>`;
-const val = (path) => esc(getPath(state.draft, path) ?? '');
+let activeStudioTool = 'colors';
 
 function renderEditor() {
   const d = state.draft;
   const s = d.settings;
   const p = state.project;
-  const musicOpts = [''].concat(state.music.map((m) => m.id));
-  const musicLabels = Object.fromEntries([['', 'No music']].concat(state.music.map((m) => [m.id, m.name])));
+  const dur = d.segments.reduce((a, g) => a + g.end - g.start, 0);
+
   $('#editor').innerHTML = `
-  <div class="ed-head"><h3>Edit clip</h3><button class="ghost" id="ed-close">Close</button></div>
-  <div class="ed-body">
-    <button type="button" class="primary" id="open-react">Play video and record a reaction</button>
-    <p class="note">Opens the clip with voice-over and camera controls.</p>
+  <header class="studio-topbar">
+    <div class="studio-top-left">
+      <button type="button" class="studio-back-btn" id="ed-close">✕ Back to clips</button>
+      <span class="studio-pill">🌐 ${esc(p.language || 'English')}</span>
+      <span class="studio-title-badge" title="${esc(d.title)}">${esc(d.title || 'Untitled Clip')}</span>
+    </div>
 
-    <fieldset><legend>Title and hook</legend>
-      <label>Title <input data-k="title" value="${val('title')}"></label>
-      <label>On-screen opener <input data-k="settings.title.text" value="${esc(s.title.text || d.hook)}" placeholder="Shown over the first seconds"></label>
-      <div class="two"><label class="check"><input type="checkbox" data-k="settings.title.enabled" ${s.title.enabled ? 'checked' : ''}> Show opener</label>
-      <label class="check"><input type="checkbox" data-k="settings.title.upper" ${s.title.upper ? 'checked' : ''}> Capital opener</label>
-      <label>Shown for (s) <input type="number" min="1" max="10" step="0.5" data-k="settings.title.seconds" value="${s.title.seconds}"></label></div>
-    </fieldset>
+    <div class="studio-tabs">
+      <button type="button" class="studio-pill on" data-cat="Key insights">Key insights</button>
+      <button type="button" class="studio-pill" data-cat="Hot take">Hot take</button>
+      <button type="button" class="studio-pill" data-cat="Quotable">Quotable</button>
+      <button type="button" class="studio-pill" data-cat="Viral hook">Viral hook</button>
+    </div>
 
-    <fieldset><legend>Cut</legend>
-      <div id="segs">${d.segments.map(segRow).join('')}</div>
-      <div class="inline"><button class="ghost" id="add-seg">Add a segment (supercut)</button></div>
-      <p class="note">Segments play in order. The source is ${fmt(p.duration)} long. Use m:ss or seconds.</p>
-      <div class="two"><label>Shape ${sel('aspect', state.config.aspects)}</label>
-      <label>Fill ${sel('settings.bg', ['blur', 'crop', 'smart', 'fit'], { blur: 'Blurred background', crop: 'Crop to fill', smart: 'Crop to face', fit: 'Solid colour bars' })}</label></div>
-      <label>Crop position (for crop modes) <input type="range" min="0" max="1" step="0.01" data-k="settings.cropX" value="${s.cropX}"></label>
-    </fieldset>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="studio-pill" style="color:var(--tape,#ffd23f);font-weight:700">★ ${d.score || 85}/100</span>
+      <select id="ed-aspect-sel" class="studio-pill" style="background:#141a26;color:#fff;border-color:rgba(255,255,255,0.15);cursor:pointer">
+        ${state.config.aspects.map(a => `<option value="${a}" ${d.aspect === a ? 'selected' : ''}>${a}</option>`).join('')}
+      </select>
+    </div>
+  </header>
 
-    <fieldset><legend>Captions</legend>
-      <label class="check"><input type="checkbox" data-k="settings.captions.enabled" ${s.captions.enabled ? 'checked' : ''}> Burn captions into the video</label>
-      <div class="two"><label>Style ${sel('settings.captions.style', state.config.captionStyles, { highlight: 'Highlight word', pop: 'Word pop', karaoke: 'Karaoke sweep', plain: 'Plain' })}</label>
-      <label>Position ${sel('settings.captions.position', ['bottom', 'middle', 'top'])}</label></div>
-      <div class="two"><label>Text colour <input type="color" data-k="settings.captions.color" value="${s.captions.color}"></label>
-      <label>Highlight colour <input type="color" data-k="settings.captions.accent" value="${s.captions.accent}"></label></div>
-      <div class="two"><label>Size <input type="range" min="0.025" max="0.08" step="0.001" data-k="settings.captions.size" value="${s.captions.size}"></label>
-      <label>Words per line <input type="number" min="1" max="6" data-k="settings.captions.maxWords" value="${s.captions.maxWords}"></label></div>
-      <label>Font ${sel('settings.captions.font', ['Arial', 'Nirmala UI', 'Mangal', 'Impact', 'Verdana', 'Georgia', 'Courier New', 'DejaVu Sans'])}</label>
-      <label class="check"><input type="checkbox" data-k="settings.captions.upper" ${s.captions.upper ? 'checked' : ''}> Capital letters</label>
-      <label>Caption text. Fix any mistakes in the transcript here.
-        <textarea id="f-text" ${p.hasTranscript ? '' : 'disabled placeholder="No transcript for this video. Turn on a transcription provider."'}>${esc(s.captions.textOverride || state.origText)}</textarea></label>
-      <div class="inline"><button type="button" class="ghost" id="fix-text" ${p.hasTranscript && state.config.llm ? '' : 'disabled'}>Fix spelling and grammar</button></div>
-      <p class="note">Corrects words in the same language. Hindi stays Hindi. Render again to burn the new words in. Use Nirmala UI for Hindi.</p>
-    </fieldset>
+  <main class="studio-stage">
+    <!-- Left Toolbar -->
+    <aside class="studio-toolbar left">
+      <button type="button" class="tool-btn ${activeStudioTool === 'style' ? 'active' : ''}" data-tool="style" title="Presets & Look"><span class="ico">🎨</span><span>Style</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'colors' ? 'active' : ''}" data-tool="colors" title="Colors & Accents"><span class="ico">🟢</span><span>Colors</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'captions' ? 'active' : ''}" data-tool="captions" title="Subtitles & Font"><span class="ico">💬</span><span>Caption</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'hook' ? 'active' : ''}" data-tool="hook" title="Top Opener & Hook Title"><span class="ico">🪝</span><span>Hook</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'title' ? 'active' : ''}" data-tool="title" title="Title & Post Copy"><span class="ico">🔤</span><span>Title</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'subtitle' ? 'active' : ''}" data-tool="subtitle" title="Transcript & AI Auto-Fix"><span class="ico">📝</span><span>Subtitle</span></button>
+      <button type="button" class="tool-btn" id="tool-safe-zones" title="Toggle Social Safe Zones Guide"><span class="ico">#️⃣</span><span>Safe zones</span></button>
+    </aside>
 
-    <fieldset><legend>Look</legend>
-      <label>Filter ${sel('settings.filter', state.config.filters)}</label>
-      <label class="check"><input type="checkbox" data-k="settings.logo.enabled" ${s.logo.enabled ? 'checked' : ''}> Show my logo</label>
-      <div class="inline"><label style="margin:0">Position ${sel('settings.logo.pos', ['tr', 'tl', 'br', 'bl'], { tr: 'Top right', tl: 'Top left', br: 'Bottom right', bl: 'Bottom left' })}</label>
-      <label style="margin:0">Logo file (PNG) <input type="file" id="logo-file" accept="image/png"></label></div>
-    </fieldset>
+    <!-- Left Flyout Drawer -->
+    <div class="studio-flyout left-dock" id="studio-flyout-left" hidden></div>
 
-    <fieldset><legend>Music</legend>
-      <label>Track ${sel('settings.music.track', musicOpts, musicLabels)}</label>
-      <label>Music volume <input type="range" min="0" max="0.6" step="0.01" data-k="settings.music.volume" value="${s.music.volume}"></label>
-      <p class="note">Music dips automatically while someone is speaking. Add your own licensed files to data/music.</p>
-    </fieldset>
+    <!-- Center Canvas -->
+    <section class="studio-canvas">
+      <div class="phone-mockup" id="phone-mockup">
+        <video id="pv" playsinline preload="auto"></video>
 
-    <dialog id="react-pop">
-      <form method="dialog" class="react-head"><h3>Play and react</h3><button class="ghost" value="close">Close</button></form>
-      <div class="react-grid">
-        <div>
-          <video id="pv" class="pv" controls playsinline></video>
-          <div class="inline"><button type="button" class="ghost" data-pm="original">Original range</button><button type="button" class="ghost" data-pm="rendered" ${d.outputFile ? '' : 'disabled'}>Rendered clip</button></div>
-        </div>
-        <fieldset><legend>Voice-over and reaction</legend>
-          <div id="voice-status">${voiceStatus()}</div>
-          <div class="inline"><button type="button" class="ghost" id="rec-voice">Record voice</button><button type="button" class="ghost" id="rec-face">Record with camera</button>
-          <label style="margin:0">Or upload <input type="file" id="voice-file" accept="audio/*,video/*"></label></div>
-          <p class="note">Use headphones. The clip plays while you record, and your take starts at the beginning of the clip.</p>
-          <div class="two"><label>Original sound ${sel('settings.voice.mode', ['duck', 'mute'], { duck: 'Lower under me', mute: 'Mute' })}</label>
-          <label>Voice volume <input type="range" min="0.5" max="2.5" step="0.05" data-k="settings.voice.volume" value="${s.voice.volume}"></label></div>
-          <div id="react-place" ${d.voice?.kind === 'face' && d.voice?.hasVideo ? '' : 'hidden'}>
-            <p class="note">Reaction place. The circle is burned in when you render.</p>
-            <div class="inline" id="bubble-pos">${bubbleButtons(s.bubble)}</div>
-            <label>Reaction size <input type="range" min="0.16" max="0.46" step="0.02" data-k="settings.bubble.size" value="${s.bubble?.size ?? 0.28}"></label>
+        <!-- Real-time on-screen title/opener overlay -->
+        <div class="pv-top-title" id="pv-top-title">${esc(s.title.text || d.hook || '')}</div>
+
+        <!-- Real-time on-screen caption overlay -->
+        <div class="pv-bottom-caption" id="pv-bottom-caption">${esc(d.title || '')}</div>
+
+        <!-- Social Media Safe Zones overlay -->
+        <div class="pv-safe-zones" id="pv-safe-zones" hidden>
+          <div style="font-size:10px;opacity:0.6;letter-spacing:1px">SHORT TITLE / TOP SAFE AREA</div>
+          <div class="sz-right-rail">
+            <span>❤️ 98K</span>
+            <span>💬 1.2K</span>
+            <span>↗️ Share</span>
+            <span>💿 Audio</span>
           </div>
-          <label>Or type a script for an AI voice <textarea id="tts-text" ${state.config.tts ? '' : 'disabled placeholder="Needs an OPENAI_API_KEY on the server"'}></textarea></label>
-          <div class="inline"><button type="button" class="ghost" id="tts-go" ${state.config.tts ? '' : 'disabled'}>Make AI voice</button></div>
-        </fieldset>
-      </div>
-    </dialog>
+          <div class="sz-bot-rail">CAPTION & MUSIC SAFE BOUNDARY</div>
+        </div>
 
-    <fieldset><legend>Post copy</legend>
-      <label>Description <textarea data-k="description">${esc(d.description)}</textarea></label>
-      <label>Hashtags <input data-k="hashtags" value="${esc((d.hashtags || []).map((h) => '#' + h).join(' '))}"></label>
-      <div class="inline">
-        <button class="ghost" id="desc-go">Write it for me</button>
-        <button class="ghost" id="desc-copy">Copy</button>
-        <button type="button" class="ghost yt-red" id="desc-yt" ${d.outputFile ? '' : 'disabled title="Render clip first"'}>Upload / Schedule Short</button>
+        <!-- Live Rendering Progress Overlay -->
+        <div class="pv-render-overlay" id="pv-render-overlay" hidden>
+          <div class="pv-spinner"></div>
+          <div class="pv-render-text" id="pv-render-label">Almost ready to share... 0%</div>
+          <div class="pv-render-bar"><i id="pv-render-bar-fill" style="width:0%"></i></div>
+        </div>
       </div>
-    </fieldset>
-  </div>
-  <div class="ed-foot"><div class="bar" id="rbar" hidden><i></i></div><span id="rtext" class="note" style="margin:0"></span><span style="flex:1"></span>
-    <a class="ghost" id="dl" download hidden>Download</a>
-    ${d.outputFile ? '<button type="button" class="ghost yt-red" id="ed-yt-btn">YouTube Short</button>' : ''}
-    <button class="primary" id="render">Render clip</button></div>`;
+
+      <!-- Player Controls -->
+      <div class="studio-player-controls">
+        <button type="button" class="sp-btn" id="sp-play" title="Play / Pause">▶</button>
+        <span class="sp-time" id="sp-cur-time">0:00</span>
+        <input type="range" class="sp-seek" id="sp-seek" min="0" max="100" value="0" step="0.1">
+        <span class="sp-time" id="sp-dur-time">${Math.round(dur)}s</span>
+        <button type="button" class="sp-btn" id="sp-vol" title="Mute / Unmute">🔊</button>
+      </div>
+    </section>
+
+    <!-- Right Flyout Drawer -->
+    <div class="studio-flyout right-dock" id="studio-flyout-right" hidden></div>
+
+    <!-- Right Toolbar -->
+    <aside class="studio-toolbar right">
+      <button type="button" class="tool-btn ${activeStudioTool === 'bg' ? 'active' : ''}" data-tool="bg" title="Background & Fill"><span class="ico">⬛</span><span>${s.bg === 'fit' ? 'Black' : s.bg === 'blur' ? 'Blur' : 'Fill'}</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'crop' ? 'active' : ''}" data-tool="crop" title="Crop & Face Centering"><span class="ico">✂️</span><span>${s.bg === 'smart' ? 'Auto' : 'Crop'}</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'speed' ? 'active' : ''}" data-tool="speed" title="Playback Speed"><span class="ico">⚡</span><span>1x</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'music' ? 'active' : ''}" data-tool="music" title="Background Music"><span class="ico">🎵</span><span>Music</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'cut' ? 'active' : ''}" data-tool="cut" title="Segments & Supercut"><span class="ico">🎞️</span><span>Cut</span></button>
+      <button type="button" class="tool-btn ${activeStudioTool === 'react' ? 'active' : ''}" data-tool="react" title="Reaction Webcam & Voiceover"><span class="ico">🔴</span><span>React</span></button>
+    </aside>
+  </main>
+
+  <footer class="studio-footbar">
+    <div class="studio-foot-left">
+      <button type="button" class="studio-btn ghost" id="apply-all-btn" title="Copy this exact look and settings to all clips in this project">Apply to all clips</button>
+      <button type="button" class="studio-btn ghost" id="reset-look-btn" title="Reset look back to defaults">Reset look</button>
+      <div class="inline" style="margin:0;gap:4px">
+        <button type="button" class="studio-pill ${state.previewMode === 'original' ? 'on' : ''}" data-pm="original">Original</button>
+        <button type="button" class="studio-pill ${state.previewMode === 'rendered' ? 'on' : ''}" data-pm="rendered" ${d.outputFile ? '' : 'disabled'}>Rendered</button>
+      </div>
+    </div>
+
+    <div class="studio-foot-right">
+      <span id="rtext" style="font-size:12px;color:#94a3b8;margin-right:8px"></span>
+      <button type="button" class="studio-btn ghost danger" id="ed-stop-render" hidden>Stop Render</button>
+      <a class="studio-btn ghost" id="dl" download hidden>⬇ Download MP4</a>
+      ${d.outputFile ? '<button type="button" class="studio-btn yt" id="ed-yt-btn">Post Short ↗</button>' : ''}
+      <button type="button" class="studio-btn primary" id="render">🎬 Render clip</button>
+    </div>
+  </footer>`;
+
   wireEditor();
   setPreview();
+  syncLiveOverlays();
   syncEditorStatus();
+  openFlyout(activeStudioTool);
+}
+
+function syncLiveOverlays() {
+  const d = state.draft;
+  if (!d) return;
+  const s = d.settings;
+
+  // Top Opener Title ("सच या झूठ?")
+  const topTitle = $('#pv-top-title');
+  if (topTitle) {
+    topTitle.textContent = s.title?.text || d.hook || '';
+    topTitle.style.display = s.title?.enabled === false ? 'none' : 'block';
+    const accent = s.captions?.accent || '#00e5a3';
+    topTitle.style.color = accent;
+    topTitle.style.textShadow = `0 0 16px ${accent}bb, 0 2px 4px rgba(0,0,0,0.95)`;
+    if (s.captions?.font) topTitle.style.fontFamily = `"${s.captions.font}", "Nirmala UI", sans-serif`;
+    topTitle.style.textTransform = s.title?.upper ? 'uppercase' : 'none';
+  }
+
+  // Bottom Subtitle Preview ("मास्टरबेशन")
+  const botCaption = $('#pv-bottom-caption');
+  if (botCaption) {
+    const raw = (s.captions?.textOverride || state.origText || d.title || '').trim();
+    const words = raw.split(/\s+/).slice(0, s.captions?.maxWords || 3);
+    const accent = s.captions?.accent || '#00e5a3';
+    if (words.length > 0) {
+      botCaption.innerHTML = words.map((w, idx) => idx === 0 ? `<span class="pv-hl" style="color:${accent};text-shadow:0 0 14px ${accent}bb">${esc(w)}</span>` : esc(w)).join(' ');
+    } else {
+      botCaption.textContent = '';
+    }
+    botCaption.style.display = s.captions?.enabled === false ? 'none' : 'block';
+    botCaption.style.color = s.captions?.color || '#ffffff';
+    if (s.captions?.font) botCaption.style.fontFamily = `"${s.captions.font}", "Nirmala UI", sans-serif`;
+    botCaption.style.textTransform = s.captions?.upper ? 'uppercase' : 'none';
+    if (s.captions?.position === 'top') {
+      botCaption.style.bottom = 'auto';
+      botCaption.style.top = '22%';
+    } else if (s.captions?.position === 'middle') {
+      botCaption.style.bottom = '46%';
+      botCaption.style.top = 'auto';
+    } else {
+      botCaption.style.bottom = '14%';
+      botCaption.style.top = 'auto';
+    }
+  }
+
+  // Phone Mockup Aspect & Background
+  const mockup = $('#phone-mockup');
+  if (mockup) {
+    if (d.aspect === '1:1') mockup.style.aspectRatio = '1/1';
+    else if (d.aspect === '16:9') mockup.style.aspectRatio = '16/9';
+    else mockup.style.aspectRatio = '9/16';
+
+    if (s.bg === 'fit') mockup.style.background = s.fitColor || '#000000';
+    else mockup.style.background = '#000000';
+  }
+}
+
+function openFlyout(tool) {
+  activeStudioTool = tool;
+  const leftFlyout = $('#studio-flyout-left');
+  const rightFlyout = $('#studio-flyout-right');
+  if (!leftFlyout || !rightFlyout) return;
+
+  // Update active state on tool buttons
+  document.querySelectorAll('.tool-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tool === tool);
+  });
+
+  if (!tool) {
+    leftFlyout.hidden = true;
+    rightFlyout.hidden = true;
+    return;
+  }
+
+  const isLeft = ['style', 'colors', 'captions', 'hook', 'title', 'subtitle'].includes(tool);
+  const targetFlyout = isLeft ? leftFlyout : rightFlyout;
+  const otherFlyout = isLeft ? rightFlyout : leftFlyout;
+  otherFlyout.hidden = true;
+
+  targetFlyout.innerHTML = buildFlyoutHTML(tool);
+  targetFlyout.hidden = false;
+  wireFlyoutControls(targetFlyout, tool);
+}
+
+function buildFlyoutHTML(tool) {
+  const d = state.draft;
+  const s = d.settings;
+  const p = state.project;
+  const musicOpts = [''].concat(state.music.map((m) => m.id));
+  const musicLabels = Object.fromEntries([['', 'No music']].concat(state.music.map((m) => [m.id, m.name])));
+
+  if (tool === 'style') {
+    return `
+      <div class="flyout-head"><h4>🎨 Style Presets</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <p class="note" style="margin:0 0 10px">1-Click Viral Visual Styles:</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div class="preset-card ${s.captions.accent === '#00e5a3' ? 'on' : ''}" data-preset="teal-glow">
+          <div><strong style="color:#00e5a3">Teal Glow (Podcast Viral)</strong><div style="font-size:11px;color:#94a3b8">Nirmala UI, Neon Cyan glow, Black fit bars</div></div>
+          <span style="font-size:18px">🔥</span>
+        </div>
+        <div class="preset-card ${s.captions.accent === '#00f3ff' ? 'on' : ''}" data-preset="cyber-neon">
+          <div><strong style="color:#00f3ff">Cyberpunk Neon</strong><div style="font-size:11px;color:#94a3b8">Impact font, Cyan pop, Blur background</div></div>
+          <span style="font-size:18px">⚡</span>
+        </div>
+        <div class="preset-card ${s.captions.accent === '#ffd23f' ? 'on' : ''}" data-preset="gold-hormozi">
+          <div><strong style="color:#ffd23f">Gold VIP (Hormozi style)</strong><div style="font-size:11px;color:#94a3b8">Impact font, Gold highlight, Face crop</div></div>
+          <span style="font-size:18px">👑</span>
+        </div>
+        <div class="preset-card ${s.captions.accent === '#ffffff' ? 'on' : ''}" data-preset="clean-minimal">
+          <div><strong style="color:#ffffff">Clean Minimal</strong><div style="font-size:11px;color:#94a3b8">Arial font, Pure white, Solid background</div></div>
+          <span style="font-size:18px">🤍</span>
+        </div>
+      </div>`;
+  }
+
+  if (tool === 'colors') {
+    const swatches = ['#00e5a3', '#00d2ff', '#ffd23f', '#ff2d78', '#ff6b35', '#ffffff'];
+    return `
+      <div class="flyout-head"><h4>🟢 Colors & Glow</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Highlight & Glow Accent</label>
+      <div class="swatches">
+        ${swatches.map((c) => `<div class="swatch ${s.captions.accent?.toLowerCase() === c.toLowerCase() ? 'on' : ''}" style="background:${c}" data-swatch="${c}"></div>`).join('')}
+      </div>
+      <label style="margin-top:12px">Custom Accent Color <input type="color" data-k="settings.captions.accent" value="${s.captions.accent || '#00e5a3'}"></label>
+      <label style="margin-top:12px">Caption Text Color <input type="color" data-k="settings.captions.color" value="${s.captions.color || '#ffffff'}"></label>`;
+  }
+
+  if (tool === 'captions') {
+    return `
+      <div class="flyout-head"><h4>💬 Subtitles & Captions</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label class="check" style="color:#fff"><input type="checkbox" data-k="settings.captions.enabled" ${s.captions.enabled ? 'checked' : ''}> Burn captions into video</label>
+      <label>Caption Style
+        <select data-k="settings.captions.style">
+          <option value="highlight" ${s.captions.style === 'highlight' ? 'selected' : ''}>Highlight word</option>
+          <option value="pop" ${s.captions.style === 'pop' ? 'selected' : ''}>Word pop</option>
+          <option value="karaoke" ${s.captions.style === 'karaoke' ? 'selected' : ''}>Karaoke sweep</option>
+          <option value="plain" ${s.captions.style === 'plain' ? 'selected' : ''}>Plain</option>
+        </select>
+      </label>
+      <label>Font (Nirmala UI recommended for Hindi)
+        <select data-k="settings.captions.font">
+          ${['Nirmala UI', 'Mangal', 'Arial', 'Impact', 'Verdana', 'Georgia', 'Courier New'].map(f => `<option value="${f}" ${s.captions.font === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+      </label>
+      <div class="two">
+        <label>Words per line <input type="number" min="1" max="6" data-k="settings.captions.maxWords" value="${s.captions.maxWords || 3}"></label>
+        <label>Position
+          <select data-k="settings.captions.position">
+            <option value="bottom" ${s.captions.position === 'bottom' ? 'selected' : ''}>Bottom</option>
+            <option value="middle" ${s.captions.position === 'middle' ? 'selected' : ''}>Middle</option>
+            <option value="top" ${s.captions.position === 'top' ? 'selected' : ''}>Top</option>
+          </select>
+        </label>
+      </div>
+      <label>Font Size <input type="range" min="0.025" max="0.08" step="0.002" data-k="settings.captions.size" value="${s.captions.size || 0.045}"></label>
+      <label class="check" style="color:#fff"><input type="checkbox" data-k="settings.captions.upper" ${s.captions.upper ? 'checked' : ''}> Capital letters</label>`;
+  }
+
+  if (tool === 'hook') {
+    return `
+      <div class="flyout-head"><h4>🪝 Top Opener & Hook</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label class="check" style="color:#fff"><input type="checkbox" data-k="settings.title.enabled" ${s.title.enabled ? 'checked' : ''}> Show on-screen opener</label>
+      <label>Opener Text (shown on top like "सच या झूठ?")
+        <input data-k="settings.title.text" value="${esc(s.title.text || d.hook || '')}" placeholder="e.g. सच या झूठ?">
+      </label>
+      <div class="two">
+        <label>Duration (s) <input type="number" min="1" max="10" step="0.5" data-k="settings.title.seconds" value="${s.title.seconds || 3}"></label>
+        <label class="check" style="margin-top:22px;color:#fff"><input type="checkbox" data-k="settings.title.upper" ${s.title.upper ? 'checked' : ''}> Capital text</label>
+      </div>`;
+  }
+
+  if (tool === 'title') {
+    return `
+      <div class="flyout-head"><h4>🔤 Title & Social Copy</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Clip Title <input data-k="title" value="${esc(d.title || '')}"></label>
+      <label>Post Description <textarea data-k="description" rows="3">${esc(d.description || '')}</textarea></label>
+      <label>Hashtags <input data-k="hashtags" value="${esc((d.hashtags || []).map((h) => '#' + h).join(' '))}"></label>
+      <div class="inline" style="margin-top:10px">
+        <button type="button" class="studio-btn ghost" id="desc-go">✨ AI Write Copy</button>
+        <button type="button" class="studio-btn ghost" id="desc-copy">📋 Copy Text</button>
+      </div>`;
+  }
+
+  if (tool === 'subtitle') {
+    return `
+      <div class="flyout-head"><h4>📝 Transcript & Subtitles</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Edit Transcript Words:
+        <textarea id="f-text" rows="5" ${p.hasTranscript ? '' : 'disabled placeholder="No transcript found."'}>${esc(s.captions.textOverride || state.origText || '')}</textarea>
+      </label>
+      <div class="inline" style="margin-top:10px">
+        <button type="button" class="studio-btn primary" id="fix-text" ${p.hasTranscript && state.config.llm ? '' : 'disabled'}>✨ AI Auto-Fix Captions</button>
+        <button type="button" class="studio-btn ghost" id="revert-text" ${p.hasTranscript ? '' : 'disabled'}>↺ Reset Audio</button>
+      </div>
+      <p class="note" style="margin-top:8px">AI Auto-Fix cleans typos and sets Hindi font to Nirmala UI automatically.</p>`;
+  }
+
+  if (tool === 'bg') {
+    return `
+      <div class="flyout-head"><h4>⬛ Background & Fit</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Fill Mode
+        <select data-k="settings.bg">
+          <option value="fit" ${s.bg === 'fit' ? 'selected' : ''}>Solid colour bars (Black)</option>
+          <option value="blur" ${s.bg === 'blur' ? 'selected' : ''}>Blurred video background</option>
+          <option value="crop" ${s.bg === 'crop' ? 'selected' : ''}>Crop to fill</option>
+          <option value="smart" ${s.bg === 'smart' ? 'selected' : ''}>Crop to face (Smart)</option>
+        </select>
+      </label>
+      <label>Bars Color <input type="color" data-k="settings.fitColor" value="${s.fitColor || '#000000'}"></label>
+      <label>Color Filter
+        <select data-k="settings.filter">
+          ${state.config.filters.map(f => `<option value="${f}" ${s.filter === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+      </label>`;
+  }
+
+  if (tool === 'crop') {
+    return `
+      <div class="flyout-head"><h4>✂️ Crop & Framing</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Manual Crop Position <input type="range" min="0" max="1" step="0.01" data-k="settings.cropX" value="${s.cropX ?? 0.5}"></label>
+      <p class="note" style="margin-top:8px">Use 0.5 for centered framing. 'Smart' mode in Background auto-tracks faces.</p>`;
+  }
+
+  if (tool === 'speed') {
+    return `
+      <div class="flyout-head"><h4>⚡ Playback Speed</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <div class="inline" style="gap:8px">
+        ${[0.75, 1, 1.25, 1.5, 2].map(sp => `<button type="button" class="studio-pill ${sp === 1 ? 'on' : ''}" data-speed="${sp}">${sp}x</button>`).join('')}
+      </div>`;
+  }
+
+  if (tool === 'music') {
+    return `
+      <div class="flyout-head"><h4>🎵 Background Music</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <label>Music Track
+        <select data-k="settings.music.track">
+          ${musicOpts.map(m => `<option value="${m}" ${s.music.track === m ? 'selected' : ''}>${musicLabels[m] || m}</option>`).join('')}
+        </select>
+      </label>
+      <label>Music Volume <input type="range" min="0" max="0.6" step="0.01" data-k="settings.music.volume" value="${s.music.volume ?? 0.18}"></label>
+      <p class="note" style="margin-top:8px">Music volume dips automatically (audio ducking) when dialogue occurs.</p>`;
+  }
+
+  if (tool === 'cut') {
+    return `
+      <div class="flyout-head"><h4>🎞️ Cut & Segments</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <div id="segs">${d.segments.map(segRow).join('')}</div>
+      <button type="button" class="studio-btn ghost" id="add-seg" style="margin-top:10px;width:100%">+ Add Segment</button>`;
+  }
+
+  if (tool === 'react') {
+    return `
+      <div class="flyout-head"><h4>🔴 Reaction Webcam & Voice</h4><button type="button" class="flyout-close" data-close-flyout>✕</button></div>
+      <div id="voice-status" style="margin-bottom:8px">${voiceStatus()}</div>
+      <div class="inline" style="gap:8px">
+        <button type="button" class="studio-btn ghost" id="rec-voice">🎙️ Voice</button>
+        <button type="button" class="studio-btn ghost" id="rec-face">📹 Camera</button>
+      </div>
+      <label style="margin-top:10px">Reaction Position</label>
+      <div class="inline" id="bubble-pos">${bubbleButtons(s.bubble)}</div>
+      <label style="margin-top:10px">Reaction Size <input type="range" min="0.16" max="0.46" step="0.02" data-k="settings.bubble.size" value="${s.bubble?.size ?? 0.28}"></label>`;
+  }
+
+  return '';
+}
+
+function wireFlyoutControls(flyout, tool) {
+  flyout.querySelector('[data-close-flyout]')?.addEventListener('click', () => openFlyout(null));
+
+  // Style Presets
+  flyout.querySelectorAll('[data-preset]').forEach((card) => {
+    card.onclick = () => {
+      const pName = card.dataset.preset;
+      const s = state.draft.settings;
+      if (pName === 'teal-glow') {
+        s.captions.accent = '#00e5a3';
+        s.captions.font = 'Nirmala UI';
+        s.captions.style = 'highlight';
+        s.bg = 'fit';
+        s.fitColor = '#000000';
+        s.title.enabled = true;
+        s.title.text = s.title.text || state.draft.hook || 'सच या झूठ?';
+      } else if (pName === 'cyber-neon') {
+        s.captions.accent = '#00f3ff';
+        s.captions.font = 'Impact';
+        s.captions.style = 'pop';
+        s.bg = 'blur';
+      } else if (pName === 'gold-hormozi') {
+        s.captions.accent = '#ffd23f';
+        s.captions.font = 'Impact';
+        s.captions.style = 'highlight';
+        s.bg = 'smart';
+      } else if (pName === 'clean-minimal') {
+        s.captions.accent = '#ffffff';
+        s.captions.font = 'Arial';
+        s.captions.style = 'plain';
+        s.bg = 'fit';
+        s.fitColor = '#000000';
+      }
+      scheduleSave();
+      syncLiveOverlays();
+      openFlyout('style');
+      toast('Style preset applied!');
+    };
+  });
+
+  // Color Swatches
+  flyout.querySelectorAll('[data-swatch]').forEach((sw) => {
+    sw.onclick = () => {
+      state.draft.settings.captions.accent = sw.dataset.swatch;
+      scheduleSave();
+      syncLiveOverlays();
+      openFlyout('colors');
+    };
+  });
+
+  // Generic data-k bindings
+  flyout.querySelectorAll('[data-k]').forEach((el) => {
+    const h = () => {
+      const k = el.dataset.k;
+      let v = el.type === 'checkbox' ? el.checked : el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
+      if (k === 'hashtags') v = el.value.split(/[\s,]+/).map((x) => x.replace(/^#/, '')).filter(Boolean);
+      setPath(state.draft, k, v);
+      if (k === 'settings.title.text') state.draft.hook = v;
+      scheduleSave();
+      syncLiveOverlays();
+    };
+    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'color' ? 'change' : 'input', h);
+  });
+
+  // Speed selector
+  flyout.querySelectorAll('[data-speed]').forEach((btn) => {
+    btn.onclick = () => {
+      const sp = Number(btn.dataset.speed);
+      const v = $('#pv');
+      if (v) v.playbackRate = sp;
+      flyout.querySelectorAll('[data-speed]').forEach((b) => b.classList.toggle('on', b === btn));
+    };
+  });
+
+  // Transcript controls in Subtitle flyout
+  flyout.querySelector('#f-text')?.addEventListener('input', (e) => {
+    state.draft.settings.captions.textOverride = e.target.value.trim() === (state.origText || '').trim() ? '' : e.target.value;
+    scheduleSave();
+    syncLiveOverlays();
+  });
+  flyout.querySelector('#revert-text')?.addEventListener('click', () => {
+    const ta = $('#f-text');
+    if (!ta) return;
+    ta.value = state.origText || '';
+    state.draft.settings.captions.textOverride = '';
+    scheduleSave();
+    syncLiveOverlays();
+    toast('Captions reset to original spoken audio words');
+  });
+  flyout.querySelector('#fix-text')?.addEventListener('click', async () => {
+    const btn = $('#fix-text');
+    const ta = $('#f-text');
+    if (!ta?.value.trim()) return toast('There is no caption text to fix', true);
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = 'Fixing with AI…';
+    try {
+      const r = await post(`/api/clips/${state.draft.id}/proofread`, { text: ta.value });
+      ta.value = r.text;
+      state.draft.settings.captions.textOverride = r.text.trim() === (state.origText || '').trim() ? '' : r.text;
+      if (/[\u0900-\u097F]/.test(r.text)) {
+        state.draft.settings.captions.font = 'Nirmala UI';
+      }
+      if (r.projectUsage) state.project.usage = r.projectUsage;
+      scheduleSave();
+      syncLiveOverlays();
+      toast('Captions fixed with AI! Render again to burn them in.');
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+
+  // AI Copy Writer
+  flyout.querySelector('#desc-go')?.addEventListener('click', async () => {
+    const btn = $('#desc-go');
+    btn.disabled = true;
+    try {
+      const c = await post(`/api/clips/${state.draft.id}/describe`);
+      state.draft.description = c.description;
+      state.draft.hashtags = c.hashtags;
+      openFlyout('title');
+      toast('Post copy generated!');
+    } catch (err) { toast(err.message, true); }
+    finally { btn.disabled = false; }
+  });
+
+  flyout.querySelector('#desc-copy')?.addEventListener('click', async () => {
+    const d = state.draft;
+    await navigator.clipboard.writeText(`${d.description}\n\n${(d.hashtags || []).map((h) => '#' + h).join(' ')}`.trim());
+    toast('Copied to clipboard!');
+  });
+
+  // Cut segments
+  const readSegs = () => {
+    state.draft.segments = [...flyout.querySelectorAll('[data-seg]')].map((r) => ({ start: parseTime($('[data-seg-s]', r).value), end: parseTime($('[data-seg-e]', r).value) }));
+  };
+  flyout.addEventListener('change', (e) => {
+    if (e.target.matches('[data-seg-s],[data-seg-e]')) { readSegs(); scheduleSave(); if (state.previewMode === 'original') setPreview(); }
+  });
+  flyout.addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-seg-rm]');
+    if (rm) { readSegs(); state.draft.segments.splice(Number(rm.dataset.segRm), 1); flyout.querySelector('#segs').innerHTML = state.draft.segments.map(segRow).join(''); scheduleSave(); }
+  });
+  flyout.querySelector('#add-seg')?.addEventListener('click', () => {
+    readSegs();
+    const last = state.draft.segments.at(-1);
+    state.draft.segments.push({ start: Math.min(last.end + 5, state.project.duration - 6), end: Math.min(last.end + 11, state.project.duration) });
+    flyout.querySelector('#segs').innerHTML = state.draft.segments.map(segRow).join('');
+    scheduleSave();
+  });
+
+  // Voiceover / React
+  flyout.querySelector('#bubble-pos')?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-bubble]');
+    if (!b) return;
+    const [x, y] = b.dataset.bubble.split(',').map(Number);
+    state.draft.settings.bubble ??= { x: 0.88, y: 0.12, size: 0.28 };
+    state.draft.settings.bubble.x = x;
+    state.draft.settings.bubble.y = y;
+    flyout.querySelectorAll('[data-bubble]').forEach((n) => n.classList.toggle('on', n === b));
+    scheduleSave();
+  });
+  flyout.querySelector('#rec-voice')?.addEventListener('click', () => toggleRecording('voice'));
+  flyout.querySelector('#rec-face')?.addEventListener('click', () => toggleRecording('face'));
+  wireVoiceRemove();
 }
 
 function segRow(g, i) {
-  return `<div class="segrow" data-seg="${i}"><label>Start <input data-seg-s value="${fmt(g.start)}"></label><label>End <input data-seg-e value="${fmt(g.end)}"></label>${state.draft.segments.length > 1 ? `<button class="ghost danger" data-seg-rm="${i}">Remove</button>` : '<span></span>'}</div>`;
+  return `<div class="segrow" data-seg="${i}"><label style="margin:0">Start <input data-seg-s value="${fmt(g.start)}" style="margin-top:2px;padding:6px 8px"></label><label style="margin:0">End <input data-seg-e value="${fmt(g.end)}" style="margin-top:2px;padding:6px 8px"></label>${state.draft.segments.length > 1 ? `<button type="button" class="studio-btn ghost danger" data-seg-rm="${i}" style="padding:4px 8px;font-size:11px">✕</button>` : '<span></span>'}</div>`;
 }
+
 const BUBBLES = [
   ['tl', 'Top left', 0.04, 0.04],
   ['tr', 'Top right', 0.96, 0.04],
@@ -440,17 +1125,11 @@ function bubbleKey(b) {
 }
 function bubbleButtons(b) {
   const on = bubbleKey(b);
-  return BUBBLES.map(([k, label, x, y]) => `<button type="button" class="ghost ${k === on ? 'on' : ''}" data-bubble="${x},${y}">${label}</button>`).join('');
-}
-function syncReactPlace() {
-  const el = $('#react-place');
-  if (!el || !state.draft) return;
-  const v = state.draft.voice;
-  el.hidden = !(v && v.kind === 'face' && v.hasVideo);
+  return BUBBLES.map(([k, label, x, y]) => `<button type="button" class="studio-pill ${k === on ? 'on' : ''}" data-bubble="${x},${y}" style="font-size:11px">${label}</button>`).join('');
 }
 function voiceStatus() {
   const v = state.draft.voice;
-  return v ? `<p class="note"><strong>${v.tts ? 'AI voice' : v.kind === 'face' ? 'Camera take' : 'Voice take'} attached.</strong> <button class="ghost danger" id="voice-rm">Remove</button></p>` : '<p class="note">No voice-over yet.</p>';
+  return v ? `<p class="note" style="margin:0"><strong>${v.tts ? 'AI voice' : v.kind === 'face' ? 'Camera take' : 'Voice take'} attached.</strong> <button type="button" class="studio-btn ghost danger" id="voice-rm" style="padding:2px 8px;font-size:11px">Remove</button></p>` : '<p class="note" style="margin:0">No voice-over attached.</p>';
 }
 
 function setPreview() {
@@ -458,12 +1137,15 @@ function setPreview() {
   const p = state.project;
   const v = $('#pv');
   if (!v) return;
-  document.querySelectorAll('[data-pm]').forEach((b) => b.classList.toggle('active', b.dataset.pm === state.previewMode));
+
+  document.querySelectorAll('[data-pm]').forEach((b) => b.classList.toggle('on', b.dataset.pm === state.previewMode));
   v.ontimeupdate = null;
+
   if (state.previewMode === 'rendered' && d.outputFile) {
     v.src = `/media/${p.id}/${d.outputFile}?v=${d.renderedAt}`;
     return;
   }
+
   const list = () => d.segments.filter((g) => Number(g.end) > Number(g.start) + 0.2);
   let idx = 0;
   const arm = () => {
@@ -472,17 +1154,39 @@ function setPreview() {
     idx = 0;
     if (Math.abs(v.currentTime - g.start) > 0.25) v.currentTime = g.start;
   };
+
   v.onloadeddata = arm;
   if (!v.src.endsWith(p.proxy)) v.src = `/media/${p.id}/${p.proxy}`;
   else arm();
+
   v.ontimeupdate = () => {
-    if (state.previewMode !== 'original') return;
     const segs = list();
     const g = segs[idx];
     if (!g) return;
+
+    // Timeline bar & counter sync
+    const curTime = $('#sp-cur-time');
+    const durTime = $('#sp-dur-time');
+    const seek = $('#sp-seek');
+    const dur = d.segments.reduce((a, seg) => a + seg.end - seg.start, 0);
+
+    if (curTime) curTime.textContent = fmt(Math.max(0, v.currentTime - g.start));
+    if (durTime) durTime.textContent = fmt(dur);
+    if (seek && dur > 0) seek.value = Math.min(100, Math.max(0, ((v.currentTime - g.start) / dur) * 100));
+
+    // Opener title duration visibility
+    const topTitle = $('#pv-top-title');
+    if (topTitle && d.settings.title.enabled !== false) {
+      const showSec = d.settings.title.seconds || 3;
+      topTitle.style.display = (v.currentTime - g.start <= showSec) ? 'block' : 'none';
+    }
+
+    if (state.previewMode !== 'original') return;
     if (v.currentTime >= g.end - 0.08) {
       if (idx >= segs.length - 1) {
         v.pause();
+        const playBtn = $('#sp-play');
+        if (playBtn) playBtn.textContent = '▶';
         if (state.recorder) stopRecording();
         return;
       }
@@ -496,16 +1200,40 @@ function syncEditorStatus() {
   if (!state.draft) return;
   const c = clipOf(state.draft.id);
   if (!c) return;
+
   const busy = c.status === 'rendering' || c.status === 'queued';
   const rb = $('#render');
-  if (!rb) return;
-  rb.disabled = busy;
-  rb.textContent = busy ? 'Rendering…' : c.outputFile ? 'Render again' : 'Render clip';
-  $('#rbar').hidden = !busy;
-  if (busy) $('#rbar i').style.width = `${c.progress}%`;
-  $('#rtext').textContent = busy ? (c.status === 'queued' ? 'Waiting for a free slot' : `${c.progress}%`) : c.status === 'error' ? 'Render failed. See below.' : '';
+  if (rb) {
+    rb.disabled = busy;
+    rb.textContent = busy ? '⏳ Rendering…' : c.outputFile ? '🎬 Render again' : '🎬 Render clip';
+  }
+
+  const stopBtn = $('#ed-stop-render');
+  if (stopBtn) stopBtn.hidden = !busy;
+
+  const overlay = $('#pv-render-overlay');
+  const overlayLabel = $('#pv-render-label');
+  const overlayBar = $('#pv-render-bar-fill');
+  if (overlay) {
+    overlay.hidden = !busy;
+    if (busy) {
+      const pText = c.status === 'queued' ? 'Queued in rendering queue…' : `Almost ready to share... ${c.progress || 0}%`;
+      if (overlayLabel) overlayLabel.textContent = pText;
+      if (overlayBar) overlayBar.style.width = `${c.progress || 0}%`;
+    }
+  }
+
+  const rtext = $('#rtext');
+  if (rtext) {
+    rtext.textContent = busy ? (c.status === 'queued' ? 'Queued' : `${c.progress}%`) : c.status === 'error' ? 'Render failed.' : '';
+  }
+
   const dl = $('#dl');
-  if (c.outputFile) { dl.hidden = false; dl.href = `/media/${state.project.id}/${c.outputFile}?v=${c.renderedAt}`; }
+  if (dl && c.outputFile) {
+    dl.hidden = false;
+    dl.href = `/media/${state.project.id}/${c.outputFile}?v=${c.renderedAt}`;
+  }
+
   if (c.status === 'done' && (c.renderedAt !== state.draft.renderedAt)) {
     state.draft.outputFile = c.outputFile;
     state.draft.renderedAt = c.renderedAt;
@@ -513,11 +1241,6 @@ function syncEditorStatus() {
     setPreview();
     $('[data-pm=rendered]').disabled = false;
   }
-  let er = $('#rerr');
-  if (c.status === 'error') {
-    if (!er) { er = document.createElement('div'); er.id = 'rerr'; er.className = 'err'; $('.ed-body').prepend(er); }
-    er.textContent = c.error;
-  } else if (er) er.remove();
 }
 
 function scheduleSave() {
@@ -539,133 +1262,121 @@ async function saveDraft() {
 
 function wireEditor() {
   const ed = $('#editor');
+
   $('#ed-close').onclick = () => { saveDraft(); closeEditor(); renderMain(); };
-  $('#open-react').onclick = openReact;
-  $('#react-pop').addEventListener('close', () => { if (state.recorder) stopRecording(); });
-  document.querySelectorAll('[data-pm]').forEach((b) => (b.onclick = () => { state.previewMode = b.dataset.pm; setPreview(); }));
 
-  ed.querySelectorAll('[data-k]').forEach((el) => {
-    const h = () => {
-      const k = el.dataset.k;
-      let v = el.type === 'checkbox' ? el.checked : el.type === 'number' || el.type === 'range' ? Number(el.value) : el.value;
-      if (k === 'hashtags') v = el.value.split(/[\s,]+/).map((x) => x.replace(/^#/, '')).filter(Boolean);
-      setPath(state.draft, k, v);
-      if (k === 'settings.title.text') state.draft.hook = v;
-      scheduleSave();
+  // Tool buttons toggle
+  ed.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => {
+    btn.onclick = () => {
+      const tool = btn.dataset.tool;
+      openFlyout(activeStudioTool === tool ? null : tool);
     };
-    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'color' ? 'change' : 'input', h);
   });
 
-  $('#f-text')?.addEventListener('input', (e) => {
-    state.draft.settings.captions.textOverride = e.target.value.trim() === state.origText.trim() ? '' : e.target.value;
-    scheduleSave();
-  });
-  $('#fix-text')?.addEventListener('click', async () => {
-    const btn = $('#fix-text');
-    const ta = $('#f-text');
-    if (!ta?.value.trim()) return toast('There is no caption text to fix', true);
-    btn.disabled = true;
-    const old = btn.textContent;
-    btn.textContent = 'Fixing…';
-    try {
-      const r = await post(`/api/clips/${state.draft.id}/proofread`, { text: ta.value });
-      ta.value = r.text;
-      state.draft.settings.captions.textOverride = r.text.trim() === state.origText.trim() ? '' : r.text;
-      if (/[\u0900-\u097F]/.test(r.text)) {
-        state.draft.settings.captions.font = 'Nirmala UI';
-        const font = ed.querySelector('[data-k="settings.captions.font"]');
-        if (font) font.value = 'Nirmala UI';
-      }
-      if (r.projectUsage) state.project.usage = r.projectUsage;
-      scheduleSave();
-      toast('Spelling and grammar updated. Render to burn them in.');
-    } catch (err) {
-      toast(err.message, true);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = old;
+  // Safe zones toggle
+  $('#tool-safe-zones')?.addEventListener('click', () => {
+    const sz = $('#pv-safe-zones');
+    if (sz) {
+      sz.hidden = !sz.hidden;
+      $('#tool-safe-zones').classList.toggle('active', !sz.hidden);
     }
   });
 
-  const readSegs = () => {
-    state.draft.segments = [...ed.querySelectorAll('[data-seg]')].map((r) => ({ start: parseTime($('[data-seg-s]', r).value), end: parseTime($('[data-seg-e]', r).value) }));
-  };
-  ed.addEventListener('change', (e) => {
-    if (e.target.matches('[data-seg-s],[data-seg-e]')) { readSegs(); scheduleSave(); if (state.previewMode === 'original') setPreview(); }
-  });
-  ed.addEventListener('click', (e) => {
-    const rm = e.target.closest('[data-seg-rm]');
-    if (rm) { readSegs(); state.draft.segments.splice(Number(rm.dataset.segRm), 1); $('#segs').innerHTML = state.draft.segments.map(segRow).join(''); scheduleSave(); }
-  });
-  $('#add-seg').onclick = () => {
-    readSegs();
-    const last = state.draft.segments.at(-1);
-    state.draft.segments.push({ start: Math.min(last.end + 5, state.project.duration - 6), end: Math.min(last.end + 11, state.project.duration) });
-    $('#segs').innerHTML = state.draft.segments.map(segRow).join('');
+  // Aspect selector in topbar
+  $('#ed-aspect-sel')?.addEventListener('change', (e) => {
+    state.draft.aspect = e.target.value;
     scheduleSave();
-  };
-
-  $('#logo-file').onchange = async (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    try { await api('/api/brand/logo', { method: 'PUT', body: f }); toast('Logo saved'); } catch (err) { toast(err.message, true); }
-  };
-
-  $('#desc-go').onclick = async () => {
-    $('#desc-go').disabled = true;
-    try {
-      const c = await post(`/api/clips/${state.draft.id}/describe`);
-      state.draft.description = c.description;
-      state.draft.hashtags = c.hashtags;
-      renderEditor();
-    } catch (err) { toast(err.message, true); }
-  };
-  $('#desc-copy').onclick = async () => {
-    const d = state.draft;
-    await navigator.clipboard.writeText(`${d.description}\n\n${(d.hashtags || []).map((h) => '#' + h).join(' ')}`.trim());
-    toast('Copied');
-  };
-  $('#desc-yt')?.addEventListener('click', () => {
-    saveDraft();
-    openYouTubeUploadModal(state.draft.id);
+    syncLiveOverlays();
   });
+
+  // Category pill tabs
+  ed.querySelectorAll('.studio-tabs .studio-pill').forEach((pill) => {
+    pill.onclick = () => {
+      ed.querySelectorAll('.studio-tabs .studio-pill').forEach((p) => p.classList.remove('on'));
+      pill.classList.add('on');
+    };
+  });
+
+  // Player controls
+  const playBtn = $('#sp-play');
+  const v = $('#pv');
+  if (playBtn && v) {
+    playBtn.onclick = () => {
+      if (v.paused) {
+        v.play();
+        playBtn.textContent = '⏸';
+      } else {
+        v.pause();
+        playBtn.textContent = '▶';
+      }
+    };
+  }
+
+  const seek = $('#sp-seek');
+  if (seek && v) {
+    seek.oninput = () => {
+      const g = state.draft.segments[0];
+      if (!g) return;
+      const dur = state.draft.segments.reduce((a, seg) => a + seg.end - seg.start, 0);
+      v.currentTime = g.start + (Number(seek.value) / 100) * dur;
+    };
+  }
+
+  const volBtn = $('#sp-vol');
+  if (volBtn && v) {
+    volBtn.onclick = () => {
+      v.muted = !v.muted;
+      volBtn.textContent = v.muted ? '🔇' : '🔊';
+    };
+  }
+
+  // Preview Mode
+  document.querySelectorAll('[data-pm]').forEach((b) => (b.onclick = () => {
+    state.previewMode = b.dataset.pm;
+    setPreview();
+  }));
+
+  // Apply to all clips
+  $('#apply-all-btn')?.addEventListener('click', async () => {
+    const btn = $('#apply-all-btn');
+    btn.disabled = true;
+    try {
+      await saveDraft();
+      const res = await post(`/api/projects/${state.project.id}/apply-settings`, {
+        settings: state.draft.settings,
+        aspect: state.draft.aspect,
+      });
+      toast(`Look applied to all ${res.updatedCount || ''} clips in this project!`);
+      if (state.pid) await selectProject(state.pid);
+    } catch (err) {
+      toast('Failed to apply settings: ' + err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Reset Look
+  $('#reset-look-btn')?.addEventListener('click', () => {
+    if (!confirm('Reset current look to defaults?')) return;
+    state.draft.settings.captions.accent = '#00e5a3';
+    state.draft.settings.captions.font = 'Nirmala UI';
+    state.draft.settings.captions.style = 'highlight';
+    state.draft.settings.bg = 'fit';
+    state.draft.settings.fitColor = '#000000';
+    state.draft.settings.filter = 'none';
+    scheduleSave();
+    syncLiveOverlays();
+    openFlyout(activeStudioTool);
+    toast('Look reset to defaults');
+  });
+
+  // Post to YouTube Short
   $('#ed-yt-btn')?.addEventListener('click', () => {
     saveDraft();
     openYouTubeUploadModal(state.draft.id);
   });
 
-  // voice-over
-  $('#bubble-pos')?.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-bubble]');
-    if (!b) return;
-    const [x, y] = b.dataset.bubble.split(',').map(Number);
-    state.draft.settings.bubble ??= { x: 0.88, y: 0.12, size: 0.28 };
-    state.draft.settings.bubble.x = x;
-    state.draft.settings.bubble.y = y;
-    $('#bubble-pos').querySelectorAll('[data-bubble]').forEach((n) => n.classList.toggle('on', n === b));
-    scheduleSave();
-  });
-
-  $('#rec-voice').onclick = () => toggleRecording('voice');
-  $('#rec-face').onclick = () => toggleRecording('face');
-  $('#voice-file').onchange = async (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    const ext = (f.name.split('.').pop() || 'webm').toLowerCase();
-    await uploadVoice(f, f.type.startsWith('video') ? 'face' : 'voice', ext);
-  };
-  $('#tts-go').onclick = async () => {
-    try {
-      const c = await post(`/api/clips/${state.draft.id}/tts`, { text: $('#tts-text').value });
-      state.draft.voice = c.voice;
-      $('#voice-status').innerHTML = voiceStatus();
-      syncReactPlace();
-      wireVoiceRemove();
-      toast('Voice-over added');
-    } catch (err) { toast(err.message, true); }
-  };
-  wireVoiceRemove();
-
+  // Render button
   $('#render').onclick = async () => {
     await saveDraft();
     try {
@@ -673,8 +1384,29 @@ function wireEditor() {
       const i = state.project.clips.findIndex((x) => x.id === c.id);
       state.project.clips[i] = c;
       syncEditorStatus();
+      await fetchTasks();
     } catch (err) { toast(err.message, true); }
   };
+
+  const edStop = $('#ed-stop-render');
+  if (edStop) {
+    edStop.onclick = async () => {
+      edStop.disabled = true;
+      edStop.textContent = 'Stopping…';
+      try {
+        await post(`/api/clips/${state.draft.id}/cancel`, {});
+        toast('Render cancelled');
+        await fetchTasks();
+        if (state.pid) await selectProject(state.pid);
+        syncEditorStatus();
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        edStop.disabled = false;
+        edStop.textContent = 'Stop Render';
+      }
+    };
+  }
 }
 
 function wireVoiceRemove() {
@@ -684,7 +1416,6 @@ function wireVoiceRemove() {
     await api(`/api/clips/${state.draft.id}/voice`, { method: 'DELETE' });
     state.draft.voice = null;
     $('#voice-status').innerHTML = voiceStatus();
-    syncReactPlace();
   };
 }
 
@@ -745,6 +1476,137 @@ function toLocalISOString(d) {
   const h = pad(d.getHours());
   const m = pad(d.getMinutes());
   return `${Y}-${M}-${D}T${h}:${m}`;
+}
+
+// ---------- YouTube cookies UI ----------
+let ytCookiesState = null;
+
+async function fetchYouTubeCookiesInfo() {
+  try {
+    ytCookiesState = await api('/api/youtube/cookies');
+    renderYouTubeCookiesBadge();
+  } catch {}
+}
+
+function renderYouTubeCookiesBadge() {
+  const badge = $('#yt-cookies-badge');
+  if (!badge) return;
+  if (ytCookiesState?.active) {
+    badge.className = 'chip yt-cookie-chip on';
+    const kb = Math.max(1, Math.round((ytCookiesState.size || 0) / 1024));
+    badge.textContent = `🍪 Cookies: Active (${kb} KB)`;
+    badge.title = 'Cookies loaded. yt-dlp will authenticate using these cookies to bypass bot checks.';
+  } else {
+    badge.className = 'chip yt-cookie-chip off';
+    badge.textContent = '🍪 Cookies: None';
+    badge.title = 'No cookies loaded. Some YouTube videos might trigger bot checks.';
+  }
+}
+
+async function openYouTubeCookiesModal() {
+  const pop = $('#yt-cookies-modal');
+  if (!pop) return;
+  try {
+    ytCookiesState = await api('/api/youtube/cookies');
+    renderYouTubeCookiesBadge();
+    const stEl = $('#yt-cookies-current-status');
+    const delBtn = $('#yt-cookie-delete-btn');
+    const testBtn = $('#yt-cookie-test-btn');
+    if (stEl) {
+      if (ytCookiesState?.active) {
+        const timeStr = ytCookiesState.mtime ? new Date(ytCookiesState.mtime).toLocaleString() : '';
+        stEl.innerHTML = `<span style="color:var(--ok);font-weight:600">✓ Cookies are loaded and active (${esc(ytCookiesState.path || 'cookies.txt')}, ${Math.max(1, Math.round((ytCookiesState.size || 0) / 1024))} KB).</span><div style="font-size:11px;color:var(--soft);margin-top:4px">Last updated: ${esc(timeStr)}</div>`;
+        if (delBtn) delBtn.hidden = false;
+        if (testBtn) testBtn.hidden = false;
+      } else {
+        stEl.innerHTML = `<span style="color:#b45309;font-weight:600">⚠️ No cookies configured yet.</span><div style="font-size:11px;color:var(--soft);margin-top:4px">Without cookies, YouTube might block requests with <em>"Sign in to confirm you're not a bot"</em> or age restrictions.</div>`;
+        if (delBtn) delBtn.hidden = true;
+        if (testBtn) testBtn.hidden = true;
+      }
+    }
+    const fileInp = $('#yt-cookie-file-input');
+    if (fileInp) fileInp.value = '';
+    const textInp = $('#yt-cookie-text');
+    if (textInp) textInp.value = '';
+    if (!pop.open) pop.showModal();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function wireYouTubeCookies() {
+  $('#yt-cookies-open-btn')?.addEventListener('click', openYouTubeCookiesModal);
+  $('#yt-cookies-badge')?.addEventListener('click', openYouTubeCookiesModal);
+
+  $('#yt-cookie-file-input')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      $('#yt-cookie-text').value = text;
+    } catch (err) {
+      toast('Failed to read file: ' + err.message, true);
+    }
+  });
+
+  $('#yt-cookie-save-btn')?.addEventListener('click', async () => {
+    let content = $('#yt-cookie-text')?.value?.trim();
+    const file = $('#yt-cookie-file-input')?.files?.[0];
+    if (!content && file) {
+      try {
+        content = await file.text();
+      } catch (err) {
+        return toast('Failed to read file: ' + err.message, true);
+      }
+    }
+    if (!content) {
+      return toast('Please select a cookies.txt file or paste cookie data', true);
+    }
+    try {
+      const res = await post('/api/youtube/cookies', { cookies: content });
+      ytCookiesState = res;
+      renderYouTubeCookiesBadge();
+      toast('Cookies saved! YouTube downloads are now authenticated.');
+      $('#yt-cookies-modal')?.close();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $('#yt-cookie-delete-btn')?.addEventListener('click', async () => {
+    if (!confirm('Delete current YouTube cookies?')) return;
+    try {
+      const res = await api('/api/youtube/cookies', { method: 'DELETE' });
+      ytCookiesState = res;
+      renderYouTubeCookiesBadge();
+      toast('Cookies deleted');
+      $('#yt-cookies-modal')?.close();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $('#yt-cookie-test-btn')?.addEventListener('click', async () => {
+    const testBtn = $('#yt-cookie-test-btn');
+    const stEl = $('#yt-cookies-current-status');
+    testBtn.disabled = true;
+    testBtn.textContent = 'Verifying…';
+    try {
+      const res = await post('/api/youtube/cookies/test', {});
+      if (stEl) {
+        stEl.innerHTML = `<span style="color:var(--ok);font-weight:600">✓ ${esc(res.message || 'Verified successfully with YouTube!')}</span>`;
+      }
+      toast('Cookies verified with YouTube successfully!');
+    } catch (err) {
+      if (stEl) {
+        stEl.innerHTML = `<span style="color:var(--danger);font-weight:600">⚠️ Verification issue:</span> <span style="font-size:12px">${esc(err.message)}</span>`;
+      }
+      toast('Cookie verification failed: ' + err.message, true);
+    } finally {
+      testBtn.disabled = false;
+      testBtn.textContent = '🔍 Test / Verify Cookies';
+    }
+  });
 }
 
 function renderYouTubeChip() {
@@ -1039,7 +1901,7 @@ function wireYouTubeModals() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || $('#editor').hidden || $('#react-pop')?.open || $('#yt-modal')?.open || $('#yt-upload-modal')?.open) return;
+  if (e.key !== 'Escape' || $('#editor').hidden || $('#react-pop')?.open || $('#yt-modal')?.open || $('#yt-upload-modal')?.open || $('#yt-cookies-modal')?.open) return;
   $('#ed-close').click();
 });
 init().catch((e) => toast(e.message, true));

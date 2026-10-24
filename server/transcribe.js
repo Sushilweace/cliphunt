@@ -13,12 +13,12 @@ export function transcribeProvider() {
 /**
  * Returns { language, segments:[{start,end,text,words:[{w,s,e}]}] } or null when disabled.
  */
-export async function transcribe(wav, workDir, duration, onProgress = () => {}) {
+export async function transcribe(wav, workDir, duration, onProgress = () => {}, opts = {}) {
   const provider = transcribeProvider();
   if (provider === 'none') return null;
   if (provider === 'mock') return mock(duration);
-  if (provider === 'local') return local(wav);
-  if (provider === 'openai') return openai(wav, workDir, duration, onProgress);
+  if (provider === 'local') return local(wav, opts);
+  if (provider === 'openai') return openai(wav, workDir, duration, onProgress, opts);
   throw new Error(`Unknown TRANSCRIBE_PROVIDER "${provider}"`);
 }
 
@@ -85,9 +85,9 @@ function mergeWhisper(results, overlap) {
   return { language, segments };
 }
 
-async function local(wav) {
+async function local(wav, opts = {}) {
   const script = path.resolve('tools/transcribe_local.py');
-  const { stdout } = await exec(pythonCmd(), [script, wav, process.env.LOCAL_WHISPER_MODEL || 'small']);
+  const { stdout } = await exec(pythonCmd(), [script, wav, process.env.LOCAL_WHISPER_MODEL || 'small'], opts);
   return JSON.parse(stdout);
 }
 

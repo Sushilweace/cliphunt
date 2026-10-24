@@ -58,6 +58,15 @@ export function exec(cmd, args, opts = {}) {
       windowsHide: true,
       env: { ...process.env, PATH: toolPath(), ...opts.env },
     });
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        try { p.kill(); } catch {}
+        return reject(new Error('Process aborted'));
+      }
+      opts.signal.addEventListener('abort', () => {
+        try { p.kill(); } catch {}
+      }, { once: true });
+    }
     let stdout = '';
     let stderr = '';
     p.stdout.on('data', (d) => (stdout += d));
@@ -68,20 +77,30 @@ export function exec(cmd, args, opts = {}) {
     p.on('error', (e) =>
       reject(new Error(e.code === 'ENOENT' ? `"${cmd}" is not installed or not on PATH` : e.message))
     );
-    p.on('close', (code) =>
-      code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${cmd} exited ${code}: ${stderr.slice(-1500)}`))
-    );
+    p.on('close', (code) => {
+      if (opts.signal?.aborted) return reject(new Error('Process aborted'));
+      return code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${cmd} exited ${code}: ${stderr.slice(-1500)}`));
+    });
   });
 }
 
 /** Run ffmpeg with a progress callback (0..1). */
-export function ffrun(args, { cwd, duration, onProgress } = {}) {
+export function ffrun(args, { cwd, duration, onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn(command('ffmpeg'), ['-hide_banner', '-y', '-progress', 'pipe:1', '-nostats', ...args], {
       cwd,
       windowsHide: true,
       env: { ...process.env, PATH: toolPath() },
     });
+    if (signal) {
+      if (signal.aborted) {
+        try { p.kill(); } catch {}
+        return reject(new Error('ffmpeg aborted'));
+      }
+      signal.addEventListener('abort', () => {
+        try { p.kill(); } catch {}
+      }, { once: true });
+    }
     let stderr = '';
     let buf = '';
     p.stdout.on('data', (d) => {
@@ -100,16 +119,17 @@ export function ffrun(args, { cwd, duration, onProgress } = {}) {
     p.on('error', (e) =>
       reject(new Error(e.code === 'ENOENT' ? 'ffmpeg is not installed or not on PATH' : e.message))
     );
-    p.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-1800)}`))
-    );
+    p.on('close', (code) => {
+      if (signal?.aborted) return reject(new Error('ffmpeg aborted'));
+      return code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-1800)}`));
+    });
   });
 }
 
-export async function probe(file) {
+export async function probe(file, opts = {}) {
   const { stdout } = await exec('ffprobe', [
     '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file,
-  ]);
+  ], opts);
   const j = JSON.parse(stdout);
   const v = j.streams.find((s) => s.codec_type === 'video' && s.disposition?.attached_pic !== 1);
   const a = j.streams.find((s) => s.codec_type === 'audio');
@@ -122,16 +142,16 @@ export async function probe(file) {
   };
 }
 
-export const extractWav = (src, out) =>
-  ffrun(['-i', src, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out]);
+export const extractWav = (src, out, opts = {}) =>
+  ffrun(['-i', src, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], opts);
 
 /** Loudness per second (dB RMS). One signal used to rank moments. */
-export async function energyPerSecond(wav) {
+export async function energyPerSecond(wav, opts = {}) {
   const { stdout } = await exec('ffmpeg', [
     '-hide_banner', '-v', 'error', '-i', wav,
     '-af', 'asetnsamples=n=16000:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-',
     '-f', 'null', '-',
-  ]);
+  ], opts);
   return [...stdout.matchAll(/RMS_level=(-?[\d.]+|-inf)/g)].map((m) => {
     const v = m[1] === '-inf' ? -90 : Number(m[1]);
     return Number.isFinite(v) ? Math.max(-90, v) : -90;
@@ -139,12 +159,15 @@ export async function energyPerSecond(wav) {
 }
 
 /** Small browser-friendly copy used for previews and faster analysis. */
-export const makeProxy = (src, out, onProgress, duration) =>
+export const makeProxy = (src, out, onProgress, duration, opts = {}) =>
   ffrun(
     ['-i', src, '-vf', 'scale=-2:480,fps=30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30',
      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', out],
-    { duration, onProgress }
+    { duration, onProgress, ...opts }
   );
 
-export const grabFrame = (src, t, out, width = 360) =>
-  ffrun(['-ss', String(Math.max(0, t)), '-i', src, '-frames:v', '1', '-vf', `scale=${width}:-2`, '-q:v', '4', out]);
+export const grabFrame = (src, t, out, width = 360, opts = {}) =>
+  exec('ffmpeg', [
+    '-hide_banner', '-v', 'error', '-ss', String(Math.max(0, t)), '-i', src,
+    '-vframes', '1', '-vf', `scale=${width}:-2`, '-q:v', '3', out,
+  ], opts);

@@ -14,6 +14,10 @@
     <h1>Cliphunt</h1>
     <p class="tagline">Paste a long video. Get short clips ready to post.</p>
     <div id="caps" class="caps" aria-live="polite"></div>
+    <button type="button" id="tasks-btn" class="tasks-btn" title="View & manage background tasks">
+      <span class="tasks-dot"></span>
+      <span id="tasks-label">Tasks (0)</span>
+    </button>
   </header>
 
   <div class="layout">
@@ -33,6 +37,13 @@
         </div>
         <div id="src-youtube" hidden>
           <input type="url" id="yt" placeholder="https://www.youtube.com/watch?v=...">
+          <div class="yt-cookies-bar" style="margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px">
+            <span id="yt-cookies-badge" class="chip yt-cookie-chip off" title="YouTube session cookies for bypassing bot checks">🍪 Cookies: None</span>
+            <button type="button" class="ghost" id="yt-cookies-open-btn" style="padding:3px 8px;font-size:11px">⚙️ Cookies Setup</button>
+          </div>
+          <p class="note" id="yt-cookie-note" style="margin-top:6px;font-size:11px;line-height:1.4">
+            💡 If YouTube blocks this video with <em>"confirm you're not a bot"</em>, use the <strong>Upload</strong> tab to upload directly, or click <strong>Cookies Setup</strong>.
+          </p>
         </div>
         <label>Project name <input id="ptitle" placeholder="Optional"></label>
         <div class="row">
@@ -94,6 +105,53 @@
     </div>
   </dialog>
 
+  <!-- YouTube Cookies (Bot Verification Bypass) Modal -->
+  <dialog id="yt-cookies-modal" class="pop">
+    <form method="dialog" class="pop-head">
+      <h3>YouTube Bot Verification (Cookies)</h3>
+      <button class="ghost" value="close">Close</button>
+    </form>
+    <div class="pop-body">
+      <div id="yt-cookies-current-status" style="margin-bottom:12px;padding:8px 12px;border-radius:6px;background:var(--bg,#f8fafc);border:1px solid var(--border,#e2e8f0);font-size:13px"></div>
+
+      <fieldset>
+        <legend>Upload cookies.txt or Paste Cookie Data</legend>
+        <p class="note" style="margin-top:0">
+          YouTube blocks automated downloads on some videos with <em>"Sign in to confirm you're not a bot"</em>. Providing exported cookies authenticates the download.
+        </p>
+
+        <label style="display:block;margin-bottom:8px">
+          Select exported <code>cookies.txt</code> file:
+          <input type="file" id="yt-cookie-file-input" accept=".txt" style="margin-top:4px">
+        </label>
+
+        <label style="display:block;margin-bottom:8px">
+          Or paste cookie text:
+          <textarea id="yt-cookie-text" rows="5" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	..."></textarea>
+        </label>
+
+        <div class="inline" style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <button type="button" class="primary" id="yt-cookie-save-btn">Save Cookies</button>
+          <button type="button" class="ghost" id="yt-cookie-test-btn" hidden>🔍 Test / Verify Cookies</button>
+          <button type="button" class="ghost danger" id="yt-cookie-delete-btn" hidden>Delete Cookies</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>How to get YouTube cookies in 1 minute</legend>
+        <ol class="guide-steps" style="padding-left:18px;margin:0;font-size:12px;line-height:1.6">
+          <li>Install Chrome extension <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noreferrer"><strong>Get cookies.txt LOCALLY</strong></a> (safe, open-source).</li>
+          <li>Open <a href="https://www.youtube.com" target="_blank" rel="noreferrer"><strong>YouTube</strong></a> in that browser while logged in.</li>
+          <li>Click the extension icon in your toolbar, then click <strong>Export</strong> (it downloads <code>cookies.txt</code>).</li>
+          <li>Choose that file above and click <strong>Save Cookies</strong>!</li>
+        </ol>
+        <p class="note" style="margin-top:8px">
+          ⚡ <em>Tip:</em> Or simply switch to the <strong>"Upload a file"</strong> tab above to upload any video file directly without needing any cookies!
+        </p>
+      </fieldset>
+    </div>
+  </dialog>
+
   <!-- YouTube Upload & Schedule Modal -->
   <dialog id="yt-upload-modal" class="pop">
     <form method="dialog" class="pop-head">
@@ -148,6 +206,23 @@
       <div class="inline" style="margin-top:16px;justify-content:flex-end">
         <button type="button" class="primary yt-red" id="ytu-submit">Upload & Schedule Short</button>
       </div>
+    </div>
+  </dialog>
+
+  <!-- Background Tasks Modal -->
+  <dialog id="tasks-modal" class="pop tasks-pop">
+    <form method="dialog" class="pop-head">
+      <div>
+        <h3>⚡ Background Tasks</h3>
+        <p id="tasks-count-sub" class="note" style="margin:2px 0 0">All active video analysis and rendering jobs</p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button type="button" class="ghost danger" id="tasks-cancel-all-btn" title="Stop and cancel all background tasks">🛑 Stop All Tasks</button>
+        <button class="ghost" value="close">✕</button>
+      </div>
+    </form>
+    <div class="pop-body">
+      <div id="tasks-list-container"></div>
     </div>
   </dialog>
 

@@ -222,7 +222,7 @@ export async function proofreadCaption(text) {
   if (!llmEnabled()) throw new Error('Spelling and grammar fix needs Gemini, Claude, or Ollama');
   const limits = tokenLimits();
   const res = await llm(
-    'You correct caption text. Fix spelling and grammar only. Keep the original language: Hindi stays Hindi, English stays English. Do not translate. Do not change the meaning or add new ideas. Return ONLY JSON: {"text":"the corrected caption"}',
+    'You are an expert subtitle and video captions editor. You are given a raw speech-to-text transcript. Fix speech recognition mistakes, phonetic mishearings, typos, capitalization, and punctuation. Keep the exact words, meaning, and original spoken language (Hindi stays Hindi, English stays English, Hinglish stays Hinglish). Do not translate. Do not add or remove core ideas. Keep word flow natural and aligned with audio. Return ONLY JSON: {"text":"the corrected caption"}',
     clean.slice(0, 6000),
     { maxTokens: Math.min(2000, limits.clip || 2000) }
   );

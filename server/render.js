@@ -28,7 +28,7 @@ const loadTranscript = (projectId) => {
 
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
-export async function renderClip(clipId) {
+export async function renderClip(clipId, { signal } = {}) {
   const clip = db.clips[clipId];
   if (!clip || clip.cancelled) return;
   const project = db.projects[clip.projectId];
@@ -38,6 +38,8 @@ export async function renderClip(clipId) {
   const work = path.join(dir, 'work', clip.id);
   fs.mkdirSync(work, { recursive: true });
   fs.mkdirSync(path.join(dir, 'clips'), { recursive: true });
+
+  try {
 
   const [W, H] = SIZES[clip.aspect] || SIZES['9:16'];
   const src = path.join(dir, project.source.file);
@@ -180,8 +182,9 @@ export async function renderClip(clipId) {
   await ffrun(args, {
     cwd: work,
     duration: total,
+    signal,
     onProgress: (p) => {
-      if (clip.cancelled || !db.clips[clipId]) return;
+      if (clip.cancelled || !db.clips[clipId] || signal?.aborted) return;
       clip.progress = Math.round(p * 100);
       const now = Date.now();
       if (now - lastSave > 1000) {
@@ -190,10 +193,13 @@ export async function renderClip(clipId) {
       }
     },
   });
-  if (clip.cancelled || !db.clips[clipId]) return;
+  if (clip.cancelled || !db.clips[clipId] || signal?.aborted) {
+    try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
+    return;
+  }
 
   const thumb = path.join(dir, 'clips', `${clip.id}.jpg`);
-  await grabFrame(outFile, Math.min(1, total / 2), thumb, 360).catch(() => {});
+  await grabFrame(outFile, Math.min(1, total / 2), thumb, 360, { signal }).catch(() => {});
   clip.outputFile = `clips/${outName}`;
   clip.renderedThumb = `clips/${clip.id}.jpg`;
   clip.renderedAt = Date.now();
@@ -202,4 +208,15 @@ export async function renderClip(clipId) {
   clip.error = null;
   fs.rmSync(work, { recursive: true, force: true });
   save();
+  } catch (err) {
+    try { fs.rmSync(work, { recursive: true, force: true }); } catch {}
+    if (clip.cancelled || signal?.aborted) {
+      clip.status = 'idle';
+      clip.progress = 0;
+      clip.error = null;
+      save();
+      return;
+    }
+    throw err;
+  }
 }

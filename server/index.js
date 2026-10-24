@@ -8,6 +8,7 @@ import { db, save, saveNow, uid, dirs, projectDir, resumeProjectIds, resumeRende
 import { analysisQueue, renderQueue } from './queue.js';
 import { runAnalysis, sourceTranscript, maxDurationSec } from './pipeline.js';
 import { renderClip, FILTERS, SIZES } from './render.js';
+import { registerTask, unregisterTask, listTasks, cancelTask, cancelAllTasks } from './tasks.js';
 import { clipWords, CAPTION_STYLES } from './captions.js';
 import { describeClip, proofreadCaption } from './highlights.js';
 import { ensureMusic, listMusic } from './music.js';
@@ -16,7 +17,15 @@ import { llmEnabled, llmProvider } from './llm.js';
 import { sanitizeSettings } from './settings.js';
 import { speak, ttsEnabled } from './tts.js';
 import { tokenLimits, addUsage, blankUsage } from './usage.js';
-import { youtubeEnabled, validateYouTubeUrl } from './youtube.js';
+import {
+  youtubeEnabled,
+  validateYouTubeUrl,
+  hasYouTubeCookies,
+  getYouTubeCookiesInfo,
+  saveYouTubeCookies,
+  deleteYouTubeCookies,
+  testYouTubeCookies,
+} from './youtube.js';
 import {
   getYouTubeStatus,
   getYouTubeAuthUrl,
@@ -130,7 +139,9 @@ route('GET', '/api/config', async (req, res) => {
     tts: ttsEnabled(),
     youtube: youtubeEnabled(),
     youtubeStatus: getYouTubeStatus(),
+    youtubeCookiesConfigured: hasYouTubeCookies(),
     llmProvider: llmProvider(),
+    autoFixCaptions: process.env.AUTO_FIX_CAPTIONS !== '0',
     maxDurationMin: Math.round(maxDurationSec() / 60),
     aspects: Object.keys(SIZES),
     filters: Object.keys(FILTERS),
@@ -193,7 +204,7 @@ route('POST', '/api/projects', async (req, res) => {
   } else return fail(res, 400, 'Add a video file or a YouTube link');
   db.projects[id] = { id, title: String(b.title || '').slice(0, 120), status: 'queued', stage: 'Waiting', progress: 0, source, options, createdAt: Date.now() };
   save();
-  analysisQueue(() => runAnalysis(id));
+  analysisQueue(() => runAnalysis(id), id);
   send(res, 200, publicProject(db.projects[id]));
 });
 
@@ -219,6 +230,24 @@ route('DELETE', '/api/projects/(\\w+)', async (req, res, m) => {
   fs.rmSync(projectDir(p.id), { recursive: true, force: true });
   save();
   send(res, 200, { ok: true });
+});
+
+route('POST', '/api/projects/(\\w+)/apply-settings', async (req, res, m) => {
+  const p = db.projects[m[1]];
+  if (!p) return fail(res, 404, 'Project not found');
+  const b = await readJSON(req);
+  if (!b.settings) return fail(res, 400, 'Settings required');
+  sanitizeSettings(b.settings);
+  let updatedCount = 0;
+  for (const c of Object.values(db.clips)) {
+    if (c.projectId === p.id) {
+      c.settings = JSON.parse(JSON.stringify(b.settings));
+      if (b.aspect) c.aspect = b.aspect;
+      updatedCount++;
+    }
+  }
+  save();
+  send(res, 200, { ok: true, updatedCount });
 });
 
 const getClip = (res, id) => {
@@ -261,17 +290,21 @@ function enqueueRender(c) {
   save();
   renderQueue(async () => {
     if (!db.clips[c.id] || c.cancelled) return;
+    const ctrl = new AbortController();
+    registerTask(`render-${c.id}`, ctrl, { type: 'render', targetId: c.id, projectId: c.projectId });
     c.status = 'rendering';
     try {
-      await renderClip(c.id);
+      await renderClip(c.id, { signal: ctrl.signal });
     } catch (e) {
-      if (!db.clips[c.id] || c.cancelled) return;
+      if (!db.clips[c.id] || c.cancelled || ctrl.signal.aborted) return;
       console.error('[render]', e.message);
       c.status = 'error';
       c.error = e.message.slice(-600);
       save();
+    } finally {
+      unregisterTask(`render-${c.id}`);
     }
-  });
+  }, c.id);
 }
 
 route('POST', '/api/clips/(\\w+)/render', async (req, res, m) => {
@@ -369,6 +402,86 @@ route('POST', '/api/clips/(\\w+)/proofread', async (req, res, m) => {
   }
 });
 
+route('POST', '/api/projects/(\\w+)/proofread-captions', async (req, res, m) => {
+  const p = db.projects[m[1]];
+  if (!p) return fail(res, 404, 'Project not found');
+  const t = sourceTranscript(p.id);
+  if (!t) return fail(res, 400, 'No transcript found for this project');
+  if (!llmEnabled()) return fail(res, 400, 'AI proofreading requires an active LLM provider');
+
+  const clips = Object.values(db.clips).filter((c) => c.projectId === p.id);
+  if (!clips.length) return fail(res, 400, 'No clips found for this project');
+
+  let fixedCount = 0;
+  await Promise.all(
+    clips.map(async (c) => {
+      try {
+        const rawWords = clipWords(t, c.segments);
+        const rawText = rawWords.map((w) => w.w).join(' ').trim();
+        const textToFix = (c.settings?.captions?.textOverride || rawText).trim();
+        if (!textToFix) return;
+        const fixed = await proofreadCaption(textToFix);
+        if (fixed?.text) {
+          c.settings.captions.textOverride = fixed.text;
+          if (/[\u0900-\u097F]/.test(fixed.text)) {
+            c.settings.captions.font = 'Nirmala UI';
+          }
+          if (fixed.usage) {
+            c.usage = addUsage(c.usage || blankUsage(), fixed.usage);
+            p.usage = addUsage(p.usage || blankUsage(), fixed.usage);
+          }
+          fixedCount++;
+        }
+      } catch (err) {
+        console.warn(`[captions] Proofread failed for clip ${c.id}:`, err.message);
+      }
+    })
+  );
+  save();
+  send(res, 200, { ok: true, fixedCount, project: publicProject(p) });
+});
+
+// ---------- background tasks management ----------
+route('GET', '/api/tasks', async (req, res) => {
+  send(res, 200, { tasks: listTasks() });
+});
+
+route('POST', '/api/tasks/([\\w-]+)/cancel', async (req, res, m) => {
+  const ok = cancelTask(m[1]);
+  send(res, 200, { ok, tasks: listTasks() });
+});
+
+route('POST', '/api/tasks/cancel-all', async (req, res) => {
+  const count = cancelAllTasks();
+  send(res, 200, { ok: true, cancelledCount: count, tasks: listTasks() });
+});
+
+route('POST', '/api/clips/(\\w+)/cancel', async (req, res, m) => {
+  cancelTask(`render-${m[1]}`);
+  const c = db.clips[m[1]];
+  send(res, 200, { ok: true, clip: c ? publicClip(c) : null });
+});
+
+route('POST', '/api/projects/(\\w+)/cancel', async (req, res, m) => {
+  cancelTask(`analysis-${m[1]}`);
+  const p = db.projects[m[1]];
+  send(res, 200, { ok: true, project: p ? publicProject(p) : null });
+});
+
+route('POST', '/api/projects/(\\w+)/retry', async (req, res, m) => {
+  const p = db.projects[m[1]];
+  if (!p) return fail(res, 404, 'Project not found');
+  cancelTask(`analysis-${p.id}`);
+  p.cancelled = false;
+  p.error = null;
+  p.status = 'queued';
+  p.stage = 'Waiting';
+  p.progress = 0;
+  save();
+  analysisQueue(() => runAnalysis(p.id), p.id);
+  send(res, 200, { ok: true, project: publicProject(p) });
+});
+
 route('GET', '/api/youtube/status', async (req, res) => {
   send(res, 200, getYouTubeStatus());
 });
@@ -421,6 +534,35 @@ route('GET', '/api/youtube/callback', async (req, res, m, url) => {
 route('POST', '/api/youtube/disconnect', async (req, res) => {
   disconnectYouTube();
   send(res, 200, getYouTubeStatus());
+});
+
+route('GET', '/api/youtube/cookies', async (req, res) => {
+  send(res, 200, getYouTubeCookiesInfo());
+});
+
+route('POST', '/api/youtube/cookies', async (req, res) => {
+  try {
+    const b = await readJSON(req);
+    const text = b.cookies || b.content || '';
+    const info = saveYouTubeCookies(text);
+    send(res, 200, { ok: true, ...info });
+  } catch (err) {
+    fail(res, 400, err.message);
+  }
+});
+
+route('DELETE', '/api/youtube/cookies', async (req, res) => {
+  const info = deleteYouTubeCookies();
+  send(res, 200, { ok: true, ...info });
+});
+
+route('POST', '/api/youtube/cookies/test', async (req, res) => {
+  try {
+    const resTest = await testYouTubeCookies();
+    send(res, 200, { ok: true, message: `Verified! YouTube accepted session (Sample: "${resTest.title}").` });
+  } catch (err) {
+    fail(res, 400, err.message);
+  }
 });
 
 route('POST', '/api/clips/(\\w+)/youtube', async (req, res, m) => {
@@ -531,6 +673,6 @@ server.listen(PORT, () => {
   if (ai === 'ollama') console.log(`Ollama: ${process.env.OLLAMA_HOST || 'http://127.0.0.1:11434'} model ${process.env.OLLAMA_MODEL || 'llama3.2:3b'} (heuristic is used if it is not running)`);
   if (ai === 'gemini') console.log(`Gemini: ${process.env.GEMINI_MODEL || 'gemini-3.8-flash'}`);
   ensureMusic();
-  for (const id of resumeProjectIds) analysisQueue(() => runAnalysis(id));
+  for (const id of resumeProjectIds) analysisQueue(() => runAnalysis(id), id);
   for (const id of resumeRenderIds) if (db.clips[id]) enqueueRender(db.clips[id]);
 });
