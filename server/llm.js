@@ -9,9 +9,11 @@ export function llmProvider() {
   if (choice === 'none') return 'none';
   if (choice === 'gemini') return process.env.GEMINI_API_KEY ? 'gemini' : 'none';
   if (choice === 'anthropic') return process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'none';
+  if (choice === 'openrouter') return process.env.OPENROUTER_API_KEY ? 'openrouter' : 'none';
   if (choice === 'ollama') return 'ollama';
   if (process.env.GEMINI_API_KEY) return 'gemini';
   if (process.env.ANTHROPIC_API_KEY) return 'anthropic';
+  if (process.env.OPENROUTER_API_KEY) return 'openrouter';
   return 'ollama';
 }
 
@@ -21,6 +23,7 @@ export async function llm(system, user, { maxTokens = 4000 } = {}) {
   const provider = llmProvider();
   if (provider === 'gemini') return gemini(system, user, maxTokens);
   if (provider === 'anthropic') return anthropic(system, user, maxTokens);
+  if (provider === 'openrouter') return openrouter(system, user, maxTokens);
   if (provider === 'ollama') return ollama(system, user, maxTokens);
   throw new Error('No LLM configured');
 }
@@ -79,6 +82,38 @@ async function anthropic(system, user, maxTokens) {
   const u = j.usage || {};
   const usage = u.input_tokens
     ? { input: u.input_tokens, output: u.output_tokens || 0, total: u.input_tokens + (u.output_tokens || 0) }
+    : estimateTokens(system, user, text);
+  return { text, usage };
+}
+
+async function openrouter(system, user, maxTokens) {
+  const model = process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4.5';
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+    },
+    signal: AbortSignal.timeout(Number(process.env.OPENROUTER_TIMEOUT_MS || 120000)),
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      // DeepSeek V4 spends the token budget on hidden reasoning and can return an empty JSON reply.
+      ...(model.includes('deepseek') ? { reasoning: { enabled: false } } : {}),
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+  });
+  if (!r.ok) throw new Error(`OpenRouter ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const j = await r.json();
+  const text = j.choices?.[0]?.message?.content || '';
+  if (!text) throw new Error('OpenRouter returned an empty reply');
+  const u = j.usage || {};
+  const usage = u.total_tokens
+    ? { input: u.prompt_tokens || 0, output: u.completion_tokens || 0, total: u.total_tokens }
     : estimateTokens(system, user, text);
   return { text, usage };
 }

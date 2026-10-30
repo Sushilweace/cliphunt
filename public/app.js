@@ -184,7 +184,7 @@ async function init() {
   const ytChip = `<button type="button" class="chip ${c.youtubeStatus?.connected ? 'on yt-connected' : 'yt-disconnected'}" id="yt-status-chip">YouTube: ${c.youtubeStatus?.connected ? (c.youtubeStatus.channel?.customUrl || c.youtubeStatus.channel?.title || 'Connected') : 'Connect'}</button>`;
   $('#caps').innerHTML = [
     [c.transcribe !== 'none', `Speech: ${c.transcribe === 'none' ? 'off' : c.transcribe}`],
-    [c.llm, c.llm ? `AI picks: ${c.llmProvider}` : 'AI picks: basic'],
+    [c.llm, c.llm ? `AI picks: ${c.llmProvider === 'openrouter' && c.llmModel ? c.llmModel.split('/').pop() : c.llmProvider}` : 'AI picks: basic'],
     [c.tts, c.tts ? 'Voice-over AI: on' : 'Voice-over AI: off'],
   ].map(([on, t]) => `<span class="chip ${on ? 'on' : ''}">${t}</span>`).join('') + ytChip;
 

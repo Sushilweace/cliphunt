@@ -141,6 +141,7 @@ route('GET', '/api/config', async (req, res) => {
     youtubeStatus: getYouTubeStatus(),
     youtubeCookiesConfigured: hasYouTubeCookies(),
     llmProvider: llmProvider(),
+    llmModel: process.env.OPENROUTER_MODEL || process.env.GEMINI_MODEL || process.env.ANTHROPIC_MODEL || '',
     autoFixCaptions: process.env.AUTO_FIX_CAPTIONS !== '0',
     maxDurationMin: Math.round(maxDurationSec() / 60),
     aspects: Object.keys(SIZES),
@@ -672,6 +673,7 @@ server.listen(PORT, () => {
   console.log(`Transcription: ${transcribeProvider()} | AI highlights: ${ai} | TTS: ${ttsEnabled() ? 'on' : 'off'}`);
   if (ai === 'ollama') console.log(`Ollama: ${process.env.OLLAMA_HOST || 'http://127.0.0.1:11434'} model ${process.env.OLLAMA_MODEL || 'llama3.2:3b'} (heuristic is used if it is not running)`);
   if (ai === 'gemini') console.log(`Gemini: ${process.env.GEMINI_MODEL || 'gemini-3.8-flash'}`);
+  if (ai === 'openrouter') console.log(`OpenRouter: ${process.env.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4.5'}`);
   ensureMusic();
   for (const id of resumeProjectIds) analysisQueue(() => runAnalysis(id), id);
   for (const id of resumeRenderIds) if (db.clips[id]) enqueueRender(db.clips[id]);
